@@ -13,7 +13,8 @@ from django.views.decorators.http import require_GET, require_POST
 
 from controlplane.models import (
     Agent, AgentFeedback, AgentRun, Approval, AuditLog,
-    BusinessUnit, Division, EvalCase, EvalRun, EvalSuite, OrgProcess, WorkStream,
+    BusinessUnit, DataConnector, Division, EvalCase, EvalRun, EvalSuite,
+    KnowledgeDocument, OrgProcess, WorkStream,
 )
 from controlplane.services.governance import governance, RegistrationError, TransitionError
 from .aggregations import (
@@ -540,4 +541,148 @@ def eval_run_detail(request, run_id):
         "error_detail": run.error_detail,
         "executed_at": run.executed_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    })
+
+
+# ── C1: Semantic agent search ─────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def semantic_search(request):
+    """GET /api/v1/agents/search/?q=<query>&top_k=5"""
+    query = request.GET.get("q", "").strip()
+    if not query:
+        return JsonResponse({"error": "q parameter required."}, status=400)
+    top_k = min(int(request.GET.get("top_k", 5)), 20)
+    bu_id = request.GET.get("business_unit") or None
+
+    from controlplane.services.embeddings import embedding_service
+    results = embedding_service.search_agents(query, top_k=top_k, business_unit_id=bu_id)
+    return JsonResponse({"query": query, "results": results, "count": len(results)})
+
+
+# ── C2: Knowledge base ────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def knowledge_documents(request):
+    """GET /api/v1/knowledge/ — list documents accessible to the user."""
+    qs = KnowledgeDocument.objects.filter(status="ready").order_by("-created_at")
+    bu_id = request.GET.get("business_unit")
+    if bu_id:
+        from django.db.models import Q as _Q
+        qs = qs.filter(_Q(business_unit_id=bu_id) | _Q(business_unit__isnull=True))
+    return JsonResponse({
+        "documents": [
+            {
+                "id": str(d.id),
+                "title": d.title,
+                "description": d.description,
+                "file_type": d.file_type,
+                "chunk_count": d.chunk_count,
+                "business_unit": d.business_unit.name if d.business_unit else None,
+                "uploaded_by": d.uploaded_by,
+                "created_at": d.created_at.isoformat(),
+            }
+            for d in qs[:50]
+        ]
+    })
+
+
+@login_required
+@require_POST
+def knowledge_retrieve(request):
+    """POST /api/v1/knowledge/retrieve/ — retrieve passages for a query."""
+    try:
+        body = json.loads(request.body.decode() or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+    query = body.get("query", "").strip()
+    if not query:
+        return JsonResponse({"error": "query required."}, status=400)
+
+    agent_id = body.get("agent_id")
+    top_k = min(int(body.get("top_k", 4)), 8)
+
+    from controlplane.services.rag import rag_service
+    from django.shortcuts import get_object_or_404
+
+    agent = get_object_or_404(Agent, id=agent_id) if agent_id else None
+
+    class _AnonAgent:
+        org_unit_id = None
+    passages = rag_service.retrieve(
+        query=query,
+        agent=agent or _AnonAgent(),
+        top_k=top_k,
+    )
+    return JsonResponse({"query": query, "passages": passages})
+
+
+@login_required
+@require_POST
+def knowledge_ingest(request):
+    """POST /api/v1/knowledge/ingest/ — ingest a text document."""
+    if not request.user.is_staff:
+        from controlplane.models import UserProfile as _UP
+        role = _UP.objects.filter(user=request.user).values_list("role", flat=True).first()
+        if role not in ("platform_admin", "agent_approver", "agent_builder"):
+            return JsonResponse({"error": "Builder role or above required."}, status=403)
+
+    try:
+        body = json.loads(request.body.decode() or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+    title = body.get("title", "").strip()
+    text  = body.get("text", "").strip()
+    if not title or not text:
+        return JsonResponse({"error": "title and text are required."}, status=400)
+
+    bu_id = body.get("business_unit_id")
+    bu = None
+    if bu_id:
+        bu = BusinessUnit.objects.filter(pk=bu_id).first()
+
+    from controlplane.services.rag import rag_service
+    doc = rag_service.ingest_text(
+        title=title,
+        text=text,
+        uploaded_by=request.user.username,
+        business_unit=bu,
+        description=body.get("description", ""),
+        source_url=body.get("source_url", ""),
+        file_type=body.get("file_type", "txt"),
+    )
+    return JsonResponse({
+        "id": str(doc.id),
+        "title": doc.title,
+        "status": doc.status,
+        "chunk_count": doc.chunk_count,
+    }, status=201)
+
+
+# ── C3: Data connectors ───────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def connectors_list(request):
+    """GET /api/v1/connectors/ — list active connectors for the user's BU."""
+    qs = DataConnector.objects.filter(is_active=True).order_by("name")
+    bu_id = request.GET.get("business_unit")
+    if bu_id:
+        from django.db.models import Q as _Q
+        qs = qs.filter(_Q(business_unit_id=bu_id) | _Q(business_unit__isnull=True))
+    return JsonResponse({
+        "connectors": [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "connector_type": c.connector_type,
+                "description": c.description,
+                "business_unit": c.business_unit.name if c.business_unit else None,
+            }
+            for c in qs
+        ]
     })

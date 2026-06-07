@@ -3,10 +3,12 @@ from django.contrib import messages
 from django.utils.html import format_html
 
 from .models import (
-    Agent, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
+    Agent, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
     Approval, AuditLog,
-    BusinessUnit, ConversationSession, Division, EvalCase, EvalRun, EvalSuite,
-    GovernanceReview, OrgProcess, TelemetryEvent, UserProfile, WorkStream,
+    BusinessUnit, ConversationSession, DataConnector, Division,
+    DocumentChunk, EvalCase, EvalRun, EvalSuite,
+    GovernanceReview, KnowledgeDocument, OrgProcess,
+    TelemetryEvent, UserProfile, WorkStream,
 )
 from .services.governance import governance, TransitionError
 
@@ -436,3 +438,73 @@ class UserProfileAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="Cross-tenant?")
     def is_cross_tenant_display(self, obj):
         return obj.is_cross_tenant
+
+
+# ── C1: Agent embeddings ──────────────────────────────────────────────────────
+
+@admin.register(AgentEmbedding)
+class AgentEmbeddingAdmin(admin.ModelAdmin):
+    list_display   = ("agent", "model_id", "has_vector", "embedded_at")
+    list_filter    = ("model_id",)
+    search_fields  = ("agent__name",)
+    readonly_fields = ("agent", "model_id", "text_hash", "embedded_at")
+    actions        = ["re_embed_action"]
+
+    @admin.display(boolean=True, description="Has vector?")
+    def has_vector(self, obj):
+        return bool(obj.vector)
+
+    @admin.action(description="↻ Re-embed selected agents")
+    def re_embed_action(self, request, queryset):
+        from controlplane.services.embeddings import embedding_service
+        count = 0
+        for emb in queryset:
+            embedding_service.embed_agent(emb.agent)
+            count += 1
+        self.message_user(request, f"Re-embedded {count} agent(s).")
+
+
+# ── C2: Knowledge documents ───────────────────────────────────────────────────
+
+class DocumentChunkInline(admin.TabularInline):
+    model = DocumentChunk
+    extra = 0
+    readonly_fields = ("chunk_index", "token_count", "has_vector_display")
+    fields = ("chunk_index", "token_count", "has_vector_display")
+    can_delete = False
+
+    @admin.display(description="Embedded?")
+    def has_vector_display(self, obj):
+        return "✓" if obj.vector else "✗"
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(KnowledgeDocument)
+class KnowledgeDocumentAdmin(admin.ModelAdmin):
+    list_display   = ("title", "business_unit", "file_type", "status",
+                      "chunk_count", "uploaded_by", "created_at")
+    list_filter    = ("status", "file_type", "business_unit")
+    search_fields  = ("title", "description", "uploaded_by")
+    readonly_fields = ("status", "chunk_count", "error_detail", "created_at", "updated_at")
+    inlines        = [DocumentChunkInline]
+    actions        = ["reindex_action"]
+
+    @admin.action(description="↻ Re-index selected documents")
+    def reindex_action(self, request, queryset):
+        from controlplane.services.rag import rag_service
+        for doc in queryset:
+            rag_service.reindex_document(doc)
+        self.message_user(request, f"Re-indexed {queryset.count()} document(s).")
+
+
+# ── C3: Data connectors ───────────────────────────────────────────────────────
+
+@admin.register(DataConnector)
+class DataConnectorAdmin(admin.ModelAdmin):
+    list_display  = ("name", "connector_type", "business_unit", "is_active", "created_at")
+    list_filter   = ("connector_type", "is_active", "business_unit")
+    search_fields = ("name", "description")
+    fields        = ("name", "connector_type", "business_unit", "description",
+                     "config", "is_active", "created_by")

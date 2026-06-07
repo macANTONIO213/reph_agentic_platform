@@ -5,9 +5,12 @@ Shared mixin that provides the three built-in platform tools:
 These tools query the local agent registry and apply governance rules.
 Both the Anthropic and OpenAI adapters use them.
 """
+import logging
 import re
 
 from django.db.models import Q
+
+logger = logging.getLogger(__name__)
 
 from controlplane.models import Agent
 
@@ -69,6 +72,29 @@ ANTHROPIC_TOOL_SCHEMAS = [
             "required": ["risk_tier"],
         },
     },
+    {
+        "name": "retrieve_knowledge",
+        "description": (
+            "Search the enterprise knowledge base for relevant documents and policies. "
+            "Use this to retrieve context from uploaded PDFs, policies, guides, and procedures "
+            "that are relevant to the user's question."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The question or topic to search for in the knowledge base.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of passages to retrieve (default 4, max 8).",
+                    "default": 4,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # ------------------------------------------------------------------
@@ -98,6 +124,14 @@ OPENAI_TOOL_SCHEMAS = [
             "name": "deployment_gate_builder",
             "description": ANTHROPIC_TOOL_SCHEMAS[2]["description"],
             "parameters": ANTHROPIC_TOOL_SCHEMAS[2]["input_schema"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retrieve_knowledge",
+            "description": ANTHROPIC_TOOL_SCHEMAS[3]["description"],
+            "parameters": ANTHROPIC_TOOL_SCHEMAS[3]["input_schema"],
         },
     },
 ]
@@ -145,6 +179,25 @@ class RegistryToolsMixin:
     ]
 
     def _registry_search(self, message: str) -> dict:
+        # C1: Try semantic search first; fall back to keyword if embeddings unavailable
+        try:
+            from controlplane.services.embeddings import embedding_service
+            bu_id = getattr(self.agent, "org_unit_id", None)
+            semantic_results = embedding_service.search_agents(
+                message, top_k=5, business_unit_id=bu_id
+            )
+            # Exclude self
+            results = [r for r in semantic_results if r["agent_id"] != str(self.agent.id)]
+            if results:
+                return {
+                    "summary": f"Found {len(results)} semantically related agent(s).",
+                    "search_type": "semantic",
+                    "matches": results,
+                }
+        except Exception:
+            pass  # fall through to keyword
+
+        # Keyword fallback
         terms = [t for t in re.split(r"[^a-zA-Z0-9]+", message[:500].lower()) if len(t) > 3]
         query = Q()
         for term in terms[:8]:
@@ -160,14 +213,20 @@ class RegistryToolsMixin:
         )
         results = [
             {
+                "agent_id": str(m.id),
                 "name": m.name,
                 "status": m.get_status_display(),
                 "risk_tier": m.risk_tier,
                 "business_unit": m.business_unit,
+                "score": 0.5,
             }
             for m in matches
         ]
-        return {"summary": f"Found {len(results)} related registered agent(s).", "matches": results}
+        return {
+            "summary": f"Found {len(results)} related registered agent(s).",
+            "search_type": "keyword",
+            "matches": results,
+        }
 
     def _classify_risk(self, message: str) -> dict:
         lowered = message.lower()
@@ -220,6 +279,32 @@ class RegistryToolsMixin:
             controls.append("Human approval required before customer-impacting actions")
         return {"summary": f"Generated {len(controls)} required control(s).", "controls": controls}
 
+    def _retrieve_knowledge(self, query: str, top_k: int = 4) -> dict:
+        """C2: Retrieve relevant passages from the knowledge base."""
+        try:
+            from controlplane.services.rag import rag_service
+            top_k = max(1, min(int(top_k), 8))
+            passages = rag_service.retrieve(query=query, agent=self.agent, top_k=top_k)
+            if not passages:
+                return {
+                    "summary": "No relevant documents found in the knowledge base.",
+                    "passages": [],
+                }
+            return {
+                "summary": f"Retrieved {len(passages)} relevant passage(s).",
+                "passages": [
+                    {
+                        "source": p["title"],
+                        "text": p["text"][:800],
+                        "relevance_score": p["score"],
+                    }
+                    for p in passages
+                ],
+            }
+        except Exception as exc:
+            logger.error("Knowledge retrieval failed: %s", exc)
+            return {"error": f"Knowledge retrieval unavailable: {exc}"}
+
     def _dispatch_tool(self, name: str, inp: dict, fallback_query: str) -> dict:
         if name == "registry_search":
             return self._registry_search(inp.get("query", fallback_query))
@@ -227,4 +312,9 @@ class RegistryToolsMixin:
             return self._classify_risk(inp.get("query", fallback_query))
         if name == "deployment_gate_builder":
             return self._deployment_checklist({"risk_tier": inp.get("risk_tier", 1)})
+        if name == "retrieve_knowledge":
+            return self._retrieve_knowledge(
+                inp.get("query", fallback_query),
+                inp.get("top_k", 4),
+            )
         return {"error": f"Unknown tool: {name}"}

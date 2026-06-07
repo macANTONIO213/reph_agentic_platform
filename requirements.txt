@@ -7,3 +7,9 @@ gunicorn>=21.2
 whitenoise>=6.6
 dj-database-url>=2.1
 psycopg2-binary>=2.9
+# Phase C — Data & Knowledge Layer
+pgvector>=0.3          # Postgres vector similarity (gracefully skipped on SQLite)
+tiktoken>=0.7          # Token-aware chunking for RAG
+pypdf>=4.0             # PDF ingestion
+python-docx>=1.1       # DOCX ingestion
+sqlalchemy>=2.0        # C3 SQL connector

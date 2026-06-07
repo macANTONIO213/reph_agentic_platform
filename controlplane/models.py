@@ -501,6 +501,158 @@ def _create_user_profile(sender, instance, created, **kwargs):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# C1 — Agent Embeddings  (semantic search)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AgentEmbedding(models.Model):
+    """
+    Stores a vector embedding of an agent's searchable metadata.
+    Regenerated whenever name / purpose / business_unit / tool_names change.
+
+    On Postgres + pgvector: stored as a native vector column for fast cosine search.
+    On SQLite (local dev): stored as JSON list; cosine similarity computed in Python.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.OneToOneField(
+        Agent, on_delete=models.CASCADE, related_name="embedding"
+    )
+    # Embedding stored as JSON array — works on both SQLite and Postgres.
+    # On Postgres with pgvector enabled, EmbeddingService uses raw SQL for ANN search.
+    vector = models.JSONField(
+        default=list,
+        help_text="Serialised float list from text-embedding-3-small (1536 dims).",
+    )
+    model_id = models.CharField(max_length=80, default="text-embedding-3-small")
+    text_hash = models.CharField(
+        max_length=64, blank=True,
+        help_text="SHA-256 of the embedded text — used to skip unchanged agents.",
+    )
+    embedded_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-embedded_at"]
+
+    def __str__(self):
+        return f"Embedding for {self.agent.name}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# C2 — Knowledge Documents  (RAG pipeline)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class KnowledgeDocument(models.Model):
+    """
+    An enterprise document ingested into the knowledge base.
+    Chunked and embedded for retrieval-augmented generation.
+    """
+    class Status(models.TextChoices):
+        PENDING    = "pending",    "Pending ingestion"
+        PROCESSING = "processing", "Processing"
+        READY      = "ready",      "Ready"
+        ERROR      = "error",      "Error"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    source_url = models.URLField(blank=True)
+    # Tenant scoping — only agents in the same BU can retrieve this doc.
+    business_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="knowledge_documents",
+        help_text="Leave blank for platform-wide documents accessible to all agents.",
+    )
+    uploaded_by = models.CharField(max_length=120)
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.PENDING
+    )
+    file_type = models.CharField(
+        max_length=10, blank=True,
+        help_text="pdf / docx / txt / md",
+    )
+    raw_text = models.TextField(
+        blank=True,
+        help_text="Full extracted text (set during ingestion).",
+    )
+    chunk_count = models.PositiveIntegerField(default=0)
+    error_detail = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.title
+
+
+class DocumentChunk(models.Model):
+    """
+    A single chunk of a KnowledgeDocument with its embedding vector.
+    Chunks are the unit of retrieval in the RAG pipeline.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(
+        KnowledgeDocument, on_delete=models.CASCADE, related_name="chunks"
+    )
+    chunk_index = models.PositiveIntegerField()
+    text = models.TextField()
+    # Same dual-mode storage as AgentEmbedding
+    vector = models.JSONField(default=list)
+    token_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["document", "chunk_index"]
+        unique_together = [("document", "chunk_index")]
+
+    def __str__(self):
+        return f"{self.document.title} chunk {self.chunk_index}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# C3 — Data Connectors
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DataConnector(models.Model):
+    """
+    A registered data source an agent can query at runtime.
+    Connection config is encrypted-at-rest in production (env-var key recommended).
+    """
+    class ConnectorType(models.TextChoices):
+        SQL      = "sql",      "SQL Database"
+        REST     = "rest",     "REST API"
+        GRAPHQL  = "graphql",  "GraphQL API"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120, unique=True)
+    connector_type = models.CharField(max_length=12, choices=ConnectorType.choices)
+    # Tenant scoping
+    business_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="data_connectors",
+    )
+    # Connection config — stored as JSON.
+    # SQL:     {"url": "postgresql://...", "schema": "public"}
+    # REST:    {"base_url": "https://api.example.com", "auth_header": "Bearer {token}"}
+    # GraphQL: {"endpoint": "https://api.example.com/graphql", "auth_header": "..."}
+    config = models.JSONField(
+        default=dict,
+        help_text="Connection configuration (do not store raw secrets — use env var references).",
+    )
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.connector_type})"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # B3 — Eval Suite / Eval Run  (production gate)
 # ──────────────────────────────────────────────────────────────────────────────
 
