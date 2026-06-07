@@ -868,6 +868,193 @@ class BudgetAlert(models.Model):
         return f"{self.agent.name} budget breach {self.period_month} (+${self.overage_usd})"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase E — Multi-Agent Orchestration
+# ──────────────────────────────────────────────────────────────────────────────
+
+class Workflow(models.Model):
+    """
+    A named multi-agent pipeline definition.
+
+    The DAG is defined by the tasks attached to this workflow via
+    WorkflowTask.  Each task declares which upstream step names it depends on
+    (depends_on JSON list of step_name strings).
+    """
+    class Status(models.TextChoices):
+        DRAFT     = "draft",     "Draft"
+        ACTIVE    = "active",    "Active"
+        ARCHIVED  = "archived",  "Archived"
+
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name        = models.CharField(max_length=160)
+    slug        = models.SlugField(unique=True)
+    description = models.TextField(blank=True)
+    business_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="workflows",
+    )
+    status      = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
+    owner       = models.CharField(max_length=120, blank=True)
+    created_by  = models.CharField(max_length=120, blank=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class WorkflowTask(models.Model):
+    """
+    A single node in a Workflow DAG.
+
+    step_name must be unique within a workflow.
+    depends_on is a list of step_name strings that must complete before
+    this task can start (e.g. ["step_a", "step_b"]).
+    input_template is a Jinja2-style string where {{outputs.step_name.key}}
+    tokens are substituted from upstream task outputs before the agent call.
+    """
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow        = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name="tasks")
+    step_name       = models.SlugField(max_length=80)
+    agent           = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name="workflow_tasks")
+    # Inline agent spec (used when agent FK is null — spawns an ephemeral agent call)
+    model_override  = models.CharField(max_length=80, blank=True, default="",
+                                       help_text="Override model for this step (empty = use agent default or model router).")
+    system_prompt   = models.TextField(blank=True, default="",
+                                       help_text="System prompt for this step (overrides agent's prompt).")
+    input_template  = models.TextField(blank=True, default="",
+                                       help_text="Message template. Use {{outputs.STEP.key}} for upstream refs.")
+    depends_on      = models.JSONField(default=list, blank=True,
+                                       help_text="List of step_name strings this step depends on.")
+    timeout_seconds = models.PositiveIntegerField(default=120,
+                                                  help_text="Max seconds before this task is marked as timed out.")
+    retry_limit     = models.PositiveSmallIntegerField(default=0,
+                                                       help_text="Number of automatic retries on failure.")
+    order           = models.PositiveSmallIntegerField(default=0,
+                                                       help_text="Display order (not execution order — use depends_on).")
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "step_name"]
+        unique_together = [("workflow", "step_name")]
+
+    def __str__(self):
+        return f"{self.workflow.slug}.{self.step_name}"
+
+
+class WorkflowRun(models.Model):
+    """An execution instance of a Workflow."""
+    class Status(models.TextChoices):
+        PENDING   = "pending",   "Pending"
+        RUNNING   = "running",   "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED    = "failed",    "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow    = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name="runs")
+    status      = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    triggered_by = models.CharField(max_length=120, default="system")
+    inputs      = models.JSONField(default=dict, blank=True,
+                                   help_text="Initial inputs passed to the workflow (available as {{inputs.key}}).")
+    outputs     = models.JSONField(default=dict, blank=True,
+                                   help_text="Accumulated step outputs: {step_name: {key: value}}.")
+    error       = models.TextField(blank=True, default="")
+    started_at  = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.workflow.name} run {self.id}"
+
+    @property
+    def duration_ms(self) -> int | None:
+        if self.completed_at and self.started_at:
+            return int((self.completed_at - self.started_at).total_seconds() * 1000)
+        return None
+
+
+class WorkflowTaskRun(models.Model):
+    """Execution record for a single WorkflowTask within a WorkflowRun."""
+    class Status(models.TextChoices):
+        PENDING   = "pending",   "Pending"
+        RUNNING   = "running",   "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED    = "failed",    "Failed"
+        SKIPPED   = "skipped",   "Skipped"
+        TIMED_OUT = "timed_out", "Timed out"
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow_run = models.ForeignKey(WorkflowRun, on_delete=models.CASCADE, related_name="task_runs")
+    task         = models.ForeignKey(WorkflowTask, on_delete=models.CASCADE, related_name="runs")
+    agent_run    = models.OneToOneField(
+        "AgentRun", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="workflow_task_run",
+        help_text="The AgentRun created by the orchestrator for this step.",
+    )
+    status       = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    attempt      = models.PositiveSmallIntegerField(default=1)
+    resolved_input  = models.TextField(blank=True, default="",
+                                        help_text="Input message after template substitution.")
+    output       = models.JSONField(default=dict, blank=True,
+                                    help_text="Structured output extracted from the agent response.")
+    raw_output   = models.TextField(blank=True, default="",
+                                    help_text="Raw agent output text.")
+    error        = models.TextField(blank=True, default="")
+    started_at   = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["started_at"]
+
+    def __str__(self):
+        return f"{self.task.step_name} [{self.status}]"
+
+
+class SharedMemory(models.Model):
+    """
+    Key-value store for cross-agent context sharing within a workflow run.
+
+    Scoped to a WorkflowRun (workflow-local) or to an Agent (agent-global).
+    Agents can read/write via the built-in memory_read / memory_write tools.
+    """
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow_run = models.ForeignKey(WorkflowRun, on_delete=models.CASCADE,
+                                     null=True, blank=True, related_name="memory_entries")
+    agent        = models.ForeignKey(Agent, on_delete=models.CASCADE,
+                                     null=True, blank=True, related_name="memory_entries")
+    key          = models.CharField(max_length=200, db_index=True)
+    value        = models.JSONField(default=dict)
+    written_by   = models.CharField(max_length=120, blank=True,
+                                    help_text="Agent slug or user label that last wrote this entry.")
+    expires_at   = models.DateTimeField(null=True, blank=True,
+                                        help_text="If set, entry is stale after this time.")
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["workflow_run", "key"]),
+            models.Index(fields=["agent", "key"]),
+        ]
+
+    def __str__(self):
+        scope = f"run:{self.workflow_run_id}" if self.workflow_run_id else f"agent:{self.agent_id}"
+        return f"[{scope}] {self.key}"
+
+    @property
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+
 class AuditLog(models.Model):
     """Append-only record of every privileged action on the platform."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

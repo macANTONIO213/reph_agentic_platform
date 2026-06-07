@@ -45,4 +45,14 @@ urlpatterns = [
     path("spans/",                                     views.otel_spans,              name="api_otel_spans"),
     # D3: Budget alerts
     path("budget-alerts/",                             views.budget_alerts,           name="api_budget_alerts"),
+    # E1: Workflows
+    path("workflows/",                                 views.workflows_list,          name="api_workflows_list"),
+    path("workflows/<uuid:workflow_id>/",              views.workflow_detail,         name="api_workflow_detail"),
+    path("workflows/<uuid:workflow_id>/run/",          views.workflow_trigger,        name="api_workflow_trigger"),
+    # E2: Workflow runs
+    path("workflow-runs/<uuid:run_id>/",               views.workflow_run_detail,     name="api_workflow_run_detail"),
+    path("workflow-runs/<uuid:run_id>/tasks/",         views.workflow_run_tasks,      name="api_workflow_run_tasks"),
+    path("workflow-runs/<uuid:run_id>/memory/",        views.shared_memory,           name="api_shared_memory"),
+    # E3: Model router explain
+    path("agents/<uuid:agent_id>/model-route/",        views.model_route_explain,     name="api_model_route"),
 ]

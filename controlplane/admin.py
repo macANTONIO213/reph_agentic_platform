@@ -8,7 +8,8 @@ from .models import (
     BusinessUnit, ConversationSession, DataConnector, Division,
     DocumentChunk, EvalCase, EvalRun, EvalSuite,
     GovernanceReview, KnowledgeDocument, OrgProcess, OtelSpan,
-    TelemetryEvent, UserProfile, WorkStream,
+    SharedMemory, TelemetryEvent, UserProfile, Workflow, WorkflowRun,
+    WorkflowTask, WorkflowTaskRun, WorkStream,
 )
 from .services.governance import governance, TransitionError
 
@@ -539,3 +540,47 @@ class BudgetAlertAdmin(admin.ModelAdmin):
     readonly_fields = ("id", "agent", "period_month", "budget_usd", "actual_usd",
                        "overage_usd", "created_at")
     ordering      = ("-created_at",)
+
+
+# ── E: Multi-agent orchestration ──────────────────────────────────────────────
+
+class WorkflowTaskInline(admin.TabularInline):
+    model  = WorkflowTask
+    extra  = 1
+    fields = ("step_name", "agent", "depends_on", "model_override",
+              "timeout_seconds", "retry_limit", "order")
+
+
+@admin.register(Workflow)
+class WorkflowAdmin(admin.ModelAdmin):
+    list_display  = ("name", "slug", "status", "owner", "business_unit", "created_at")
+    list_filter   = ("status", "business_unit")
+    search_fields = ("name", "slug", "owner")
+    prepopulated_fields = {"slug": ("name",)}
+    inlines       = [WorkflowTaskInline]
+
+
+class WorkflowTaskRunInline(admin.TabularInline):
+    model         = WorkflowTaskRun
+    extra         = 0
+    fields        = ("task", "status", "attempt", "error", "started_at", "completed_at")
+    readonly_fields = ("task", "status", "attempt", "error", "started_at", "completed_at")
+    can_delete    = False
+
+
+@admin.register(WorkflowRun)
+class WorkflowRunAdmin(admin.ModelAdmin):
+    list_display  = ("workflow", "status", "triggered_by", "started_at", "completed_at")
+    list_filter   = ("status", "workflow")
+    search_fields = ("workflow__name", "triggered_by")
+    readonly_fields = ("id", "workflow", "status", "triggered_by", "inputs", "outputs",
+                       "error", "started_at", "completed_at")
+    inlines       = [WorkflowTaskRunInline]
+
+
+@admin.register(SharedMemory)
+class SharedMemoryAdmin(admin.ModelAdmin):
+    list_display  = ("key", "workflow_run", "agent", "written_by", "expires_at", "updated_at")
+    list_filter   = ("agent",)
+    search_fields = ("key", "written_by")
+    readonly_fields = ("id", "created_at", "updated_at")

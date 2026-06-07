@@ -789,3 +789,225 @@ def budget_alerts(request):
         ],
         "count": len(alerts),
     })
+
+
+# ── E1: Workflows ─────────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def workflows_list(request):
+    """GET /api/v1/workflows/ — list workflows."""
+    from controlplane.models import Workflow
+    qs = Workflow.objects.select_related("business_unit").order_by("name")
+    status_filter = request.GET.get("status")
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    return JsonResponse({
+        "workflows": [
+            {
+                "id":           str(w.id),
+                "slug":         w.slug,
+                "name":         w.name,
+                "description":  w.description,
+                "status":       w.status,
+                "owner":        w.owner,
+                "business_unit": w.business_unit.name if w.business_unit else None,
+                "task_count":   w.tasks.count(),
+                "created_at":   w.created_at.isoformat(),
+            }
+            for w in qs
+        ]
+    })
+
+
+@login_required
+def workflow_detail(request, workflow_id):
+    """GET /api/v1/workflows/<id>/ — workflow + tasks."""
+    from controlplane.models import Workflow
+    try:
+        w = Workflow.objects.prefetch_related("tasks__agent").get(id=workflow_id)
+    except Workflow.DoesNotExist:
+        return JsonResponse({"error": "Workflow not found."}, status=404)
+
+    return JsonResponse({
+        "id":           str(w.id),
+        "slug":         w.slug,
+        "name":         w.name,
+        "description":  w.description,
+        "status":       w.status,
+        "owner":        w.owner,
+        "business_unit": w.business_unit.name if w.business_unit else None,
+        "tasks": [
+            {
+                "id":             str(t.id),
+                "step_name":      t.step_name,
+                "agent_slug":     t.agent.slug if t.agent else None,
+                "model_override": t.model_override,
+                "depends_on":     t.depends_on,
+                "input_template": t.input_template,
+                "timeout_seconds": t.timeout_seconds,
+                "retry_limit":    t.retry_limit,
+                "order":          t.order,
+            }
+            for t in w.tasks.all()
+        ],
+        "created_at": w.created_at.isoformat(),
+    })
+
+
+@login_required
+@require_POST
+def workflow_trigger(request, workflow_id):
+    """POST /api/v1/workflows/<id>/run/ — trigger a workflow run."""
+    from controlplane.models import Workflow
+    from controlplane.services.orchestrator import orchestrator
+    import threading
+
+    try:
+        w = Workflow.objects.get(id=workflow_id, status=Workflow.Status.ACTIVE)
+    except Workflow.DoesNotExist:
+        return JsonResponse({"error": "Workflow not found or not active."}, status=404)
+
+    try:
+        body = json.loads(request.body or "{}")
+    except Exception:
+        body = {}
+
+    inputs = body.get("inputs", {})
+    run = orchestrator.start(w, inputs=inputs, triggered_by=request.user.username)
+
+    # Execute in a background thread so the HTTP response is immediate
+    def _run():
+        orchestrator.execute(run)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    return JsonResponse({
+        "workflow_run_id": str(run.id),
+        "status":          run.status,
+        "message":         "Workflow run started.",
+    }, status=202)
+
+
+# ── E2: Workflow runs ─────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def workflow_run_detail(request, run_id):
+    """GET /api/v1/workflow-runs/<id>/ — run status + outputs."""
+    from controlplane.models import WorkflowRun
+    try:
+        r = WorkflowRun.objects.select_related("workflow").get(id=run_id)
+    except WorkflowRun.DoesNotExist:
+        return JsonResponse({"error": "Workflow run not found."}, status=404)
+
+    return JsonResponse({
+        "id":           str(r.id),
+        "workflow":     {"id": str(r.workflow.id), "slug": r.workflow.slug, "name": r.workflow.name},
+        "status":       r.status,
+        "triggered_by": r.triggered_by,
+        "inputs":       r.inputs,
+        "outputs":      r.outputs,
+        "error":        r.error,
+        "duration_ms":  r.duration_ms,
+        "started_at":   r.started_at.isoformat(),
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+    })
+
+
+@login_required
+@require_GET
+def workflow_run_tasks(request, run_id):
+    """GET /api/v1/workflow-runs/<id>/tasks/ — per-step status."""
+    from controlplane.models import WorkflowRun
+    try:
+        r = WorkflowRun.objects.get(id=run_id)
+    except WorkflowRun.DoesNotExist:
+        return JsonResponse({"error": "Workflow run not found."}, status=404)
+
+    task_runs = r.task_runs.select_related("task__agent").order_by("started_at")
+    return JsonResponse({
+        "workflow_run_id": str(r.id),
+        "tasks": [
+            {
+                "step_name":      tr.task.step_name,
+                "agent_slug":     tr.task.agent.slug if tr.task.agent else None,
+                "status":         tr.status,
+                "attempt":        tr.attempt,
+                "resolved_input": tr.resolved_input[:200] if tr.resolved_input else "",
+                "output":         tr.output,
+                "error":          tr.error,
+                "started_at":     tr.started_at.isoformat(),
+                "completed_at":   tr.completed_at.isoformat() if tr.completed_at else None,
+            }
+            for tr in task_runs
+        ],
+    })
+
+
+# ── E3: Model router explain ──────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def model_route_explain(request, agent_id):
+    """GET /api/v1/agents/<id>/model-route/ — explain model routing for this agent."""
+    from controlplane.models import Agent
+    from controlplane.services.model_router import model_router
+    try:
+        agent = Agent.objects.get(id=agent_id)
+    except Agent.DoesNotExist:
+        return JsonResponse({"error": "Agent not found."}, status=404)
+    return JsonResponse(model_router.explain(agent))
+
+
+# ── E4: Shared memory ─────────────────────────────────────────────────────────
+
+@login_required
+def shared_memory(request, run_id):
+    """
+    GET  /api/v1/workflow-runs/<id>/memory/ — list memory entries
+    POST /api/v1/workflow-runs/<id>/memory/ — write a memory entry
+    """
+    from controlplane.models import WorkflowRun, SharedMemory
+    from controlplane.services.memory import memory_service
+
+    try:
+        run = WorkflowRun.objects.get(id=run_id)
+    except WorkflowRun.DoesNotExist:
+        return JsonResponse({"error": "Workflow run not found."}, status=404)
+
+    if request.method == "GET":
+        entries = SharedMemory.objects.filter(workflow_run=run).order_by("-updated_at")
+        return JsonResponse({
+            "entries": [
+                {
+                    "key":        e.key,
+                    "value":      e.value,
+                    "written_by": e.written_by,
+                    "expires_at": e.expires_at.isoformat() if e.expires_at else None,
+                    "updated_at": e.updated_at.isoformat(),
+                }
+                for e in entries
+                if not e.is_expired
+            ]
+        })
+
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body)
+        except Exception:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+        key = body.get("key")
+        value = body.get("value")
+        if not key:
+            return JsonResponse({"error": "key is required."}, status=400)
+        ttl = body.get("ttl_seconds")
+        memory_service.write(
+            key=key, value=value, workflow_run=run,
+            written_by=request.user.username,
+            ttl_seconds=int(ttl) if ttl else None,
+        )
+        return JsonResponse({"written": True, "key": key})
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)

@@ -95,6 +95,64 @@ ANTHROPIC_TOOL_SCHEMAS = [
             "required": ["query"],
         },
     },
+    # E — Phase E: cross-agent memory
+    {
+        "name": "memory_read",
+        "description": (
+            "Read a value from shared cross-agent memory. "
+            "Use this to retrieve context written by a previous agent in the same workflow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "The memory key to read."},
+            },
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "memory_write",
+        "description": (
+            "Write a value to shared cross-agent memory so downstream agents can access it. "
+            "Use this to persist important findings or summaries for later steps."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key":   {"type": "string", "description": "The memory key to write."},
+                "value": {"type": "string", "description": "The value to store (string or JSON string)."},
+                "ttl_seconds": {
+                    "type": "integer",
+                    "description": "Optional expiry in seconds. 0 = no expiry.",
+                    "default": 0,
+                },
+            },
+            "required": ["key", "value"],
+        },
+    },
+    # E — Phase E: agent-to-agent delegation
+    {
+        "name": "delegate_to_agent",
+        "description": (
+            "Delegate a sub-task to another registered agent by slug. "
+            "Use this when a specialised agent can better handle part of the request. "
+            "Returns the delegated agent's output."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_slug": {
+                    "type": "string",
+                    "description": "The slug of the target agent (from the agent registry).",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The full message / task to send to the target agent.",
+                },
+            },
+            "required": ["agent_slug", "message"],
+        },
+    },
 ]
 
 # ------------------------------------------------------------------
@@ -132,6 +190,30 @@ OPENAI_TOOL_SCHEMAS = [
             "name": "retrieve_knowledge",
             "description": ANTHROPIC_TOOL_SCHEMAS[3]["description"],
             "parameters": ANTHROPIC_TOOL_SCHEMAS[3]["input_schema"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_read",
+            "description": ANTHROPIC_TOOL_SCHEMAS[4]["description"],
+            "parameters": ANTHROPIC_TOOL_SCHEMAS[4]["input_schema"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_write",
+            "description": ANTHROPIC_TOOL_SCHEMAS[5]["description"],
+            "parameters": ANTHROPIC_TOOL_SCHEMAS[5]["input_schema"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_agent",
+            "description": ANTHROPIC_TOOL_SCHEMAS[6]["description"],
+            "parameters": ANTHROPIC_TOOL_SCHEMAS[6]["input_schema"],
         },
     },
 ]
@@ -305,6 +387,60 @@ class RegistryToolsMixin:
             logger.error("Knowledge retrieval failed: %s", exc)
             return {"error": f"Knowledge retrieval unavailable: {exc}"}
 
+    def _memory_read(self, key: str) -> dict:
+        """E: Read from cross-agent shared memory."""
+        try:
+            from controlplane.services.memory import memory_service
+            # workflow_run context comes from agent attributes set by the orchestrator
+            workflow_run = getattr(self, "_workflow_run", None)
+            value = memory_service.read(key=key, workflow_run=workflow_run, agent=self.agent)
+            if value is None:
+                return {"found": False, "key": key, "value": None}
+            return {"found": True, "key": key, "value": value}
+        except Exception as exc:
+            logger.error("Memory read failed: %s", exc)
+            return {"error": f"Memory read unavailable: {exc}"}
+
+    def _memory_write(self, key: str, value: str, ttl_seconds: int = 0) -> dict:
+        """E: Write to cross-agent shared memory."""
+        try:
+            from controlplane.services.memory import memory_service
+            import json as _json
+            # Try to parse value as JSON; fall back to raw string
+            try:
+                parsed = _json.loads(value)
+            except Exception:
+                parsed = value
+            workflow_run = getattr(self, "_workflow_run", None)
+            ttl = int(ttl_seconds) if ttl_seconds else None
+            memory_service.write(
+                key=key,
+                value=parsed,
+                workflow_run=workflow_run,
+                agent=self.agent if workflow_run is None else None,
+                written_by=getattr(self, "user_label", "agent"),
+                ttl_seconds=ttl,
+            )
+            return {"written": True, "key": key}
+        except Exception as exc:
+            logger.error("Memory write failed: %s", exc)
+            return {"error": f"Memory write unavailable: {exc}"}
+
+    def _delegate_to_agent(self, agent_slug: str, message: str) -> dict:
+        """E: Delegate a sub-task to another agent."""
+        try:
+            from controlplane.services.orchestrator import delegate_to_agent
+            workflow_run = getattr(self, "_workflow_run", None)
+            return delegate_to_agent(
+                agent_slug=agent_slug,
+                message=message,
+                workflow_run=workflow_run,
+                caller_label=f"agent:{self.agent.slug}",
+            )
+        except Exception as exc:
+            logger.error("Delegation failed: %s", exc)
+            return {"error": f"Delegation unavailable: {exc}"}
+
     def _dispatch_tool(self, name: str, inp: dict, fallback_query: str) -> dict:
         if name == "registry_search":
             return self._registry_search(inp.get("query", fallback_query))
@@ -316,5 +452,18 @@ class RegistryToolsMixin:
             return self._retrieve_knowledge(
                 inp.get("query", fallback_query),
                 inp.get("top_k", 4),
+            )
+        if name == "memory_read":
+            return self._memory_read(inp.get("key", ""))
+        if name == "memory_write":
+            return self._memory_write(
+                inp.get("key", ""),
+                inp.get("value", ""),
+                inp.get("ttl_seconds", 0),
+            )
+        if name == "delegate_to_agent":
+            return self._delegate_to_agent(
+                inp.get("agent_slug", ""),
+                inp.get("message", fallback_query),
             )
         return {"error": f"Unknown tool: {name}"}
