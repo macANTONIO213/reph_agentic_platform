@@ -1,0 +1,682 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>REPH Agentic AI Platform</title>
+    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-3">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <main class="app-page">
+      <section class="platform-app" id="live-agent" aria-label="REPH Agentic AI Platform">
+        <header class="platform-topbar">
+          <strong>REPH Agentic AI Platform</strong>
+          <div class="topbar-actions">
+            <label class="search-field">
+              <span class="sr-only">Search agents</span>
+              <input id="platformSearch" type="search" placeholder="Search agents, owners, deployments">
+            </label>
+            <span class="topbar-user">{{ request.user.username }}</span>
+            <a class="admin-button" href="/manage/">Admin</a>
+            <form method="post" action="/accounts/logout/" style="display:inline">{% csrf_token %}<button class="admin-button" type="submit">Log out</button></form>
+          </div>
+        </header>
+
+        <div class="platform-body">
+          <nav class="left-rail" aria-label="Platform navigation">
+            <button class="active" type="button" data-view-tab="deployments">Deployments</button>
+            <button type="button" data-view-tab="monitoring">Monitoring</button>
+            <button type="button" data-view-tab="catalog">Agent Catalog</button>
+          </nav>
+
+          <div class="workspace">
+
+            <!-- ── Deployments ─────────────────────────────────────────────── -->
+            <section class="command-center platform-view active" id="deployments" data-view-panel="deployments" aria-labelledby="command-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="command-title">Deployment command center</h2>
+                  <p>Production agents</p>
+                </div>
+                <div class="status-actions" aria-label="Command center status">
+                  <span class="state-badge live">Live</span>
+                  <span class="state-badge review">Needs review</span>
+                </div>
+              </div>
+
+              <div class="estate-grid" aria-label="Platform status">
+                <article class="metric-card tone-blue">
+                  <span>Agent estate</span>
+                  <strong>Managed</strong>
+                  <small>{{ metrics.registered_agents }} registered agents</small>
+                </article>
+                <article class="metric-card tone-green">
+                  <span>Runtime health</span>
+                  <strong>Tracked</strong>
+                  <small>{{ metrics.total_runs }} monthly runs</small>
+                </article>
+                <article class="metric-card tone-orange">
+                  <span>Policy posture</span>
+                  <strong>Gated</strong>
+                  <small>Tier {{ live_agent.risk_tier }} controls active</small>
+                </article>
+                <article class="metric-card tone-purple">
+                  <span>Improve queue</span>
+                  <strong>Prioritized</strong>
+                  <small>{{ metrics.production_agents }} production agents</small>
+                </article>
+              </div>
+
+              <div class="deployment-grid">
+                <article class="deployment-card">
+
+                  <!-- Agent selector -->
+                  <div class="agent-selector-bar">
+                    <label class="agent-selector-label" for="agentPicker">Select agent</label>
+                    <select id="agentPicker" class="agent-picker-select">
+                      {% for agent in agents %}
+                        <option value="{{ agent.id }}"
+                                data-name="{{ agent.name }}"
+                                data-owner="{{ agent.owner }}"
+                                data-version="{{ agent.version }}"
+                                data-status="{{ agent.status }}"
+                                data-status-display="{{ agent.get_status_display }}"
+                                data-platform="{{ agent.get_platform_display }}"
+                                data-purpose="{{ agent.purpose|truncatechars:120 }}"
+                                data-tier="{{ agent.risk_tier }}"
+                                {% if live_agent and agent.id == live_agent.id %}selected{% endif %}>
+                          {{ agent.name }} — {{ agent.get_status_display }}
+                        </option>
+                      {% endfor %}
+                    </select>
+                  </div>
+
+                  <div class="deployment-heading">
+                    <div>
+                      <h3 id="runAgentName">{{ live_agent.name }}</h3>
+                      <p id="runAgentMeta">Owner: {{ live_agent.owner }} | Version: v{{ live_agent.version }} | Status: {{ live_agent.get_status_display }}</p>
+                    </div>
+                    <span class="status-pill {{ live_agent.status }}" id="runAgentStatus">{{ live_agent.get_status_display }}</span>
+                  </div>
+
+                  <div class="release-flow" aria-label="Release flow">
+                    <span class="flow-step tone-blue">Build</span>
+                    <b>-></b>
+                    <span class="flow-step tone-cyan">Evals</span>
+                    <b>-></b>
+                    <span class="flow-step tone-orange">Policy</span>
+                    <b>-></b>
+                    <span class="flow-step tone-green">Release</span>
+                  </div>
+                  <p class="release-note">Rollback ready | audit trail active | eval baseline attached</p>
+
+                  <div class="live-run-panel">
+                    <div class="live-run-heading">
+                      <div>
+                        <span>Live agent run</span>
+                        <strong id="runAgentPurpose">Deploy and govern a new agent in real time</strong>
+                      </div>
+                      <span class="runtime-chip" id="runAgentPlatform">{{ live_agent.get_platform_display }}</span>
+                    </div>
+
+                    <form class="run-form" id="agentRunForm" data-agent-id="{{ live_agent.id }}">
+                      {% csrf_token %}
+                      <label for="agentMessage">Your prompt</label>
+                      <textarea id="agentMessage" rows="4">We want to deploy a Sales account briefing agent that reads Salesforce, summarizes customer activity, and creates prep notes for account executives. What risk tier and controls do we need?</textarea>
+                      <div class="form-actions">
+                        <button class="button primary" type="submit">Run agent</button>
+                        <span>Streams answer, calls tools, writes telemetry.</span>
+                      </div>
+                    </form>
+
+                    <div class="chat-log" id="chatLog">
+                      <div class="message agent">
+                        <strong id="chatAgentName">{{ live_agent.name }}</strong>
+                        <p>Ready. Select an agent above, type your prompt and click Run.</p>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+
+                <aside class="action-queue" id="governance" aria-label="Action queue">
+                  <h3>Action queue</h3>
+                  <div class="queue-item">
+                    <span class="count orange">{{ pending_reviews }}</span>
+                    <p>pending reviews</p>
+                  </div>
+                  <div class="queue-item">
+                    <span class="count blue">{{ metrics.registered_agents }}</span>
+                    <p>registered agents</p>
+                  </div>
+                  <div class="queue-item">
+                    <span class="count green">{{ metrics.production_agents }}</span>
+                    <p>in production</p>
+                  </div>
+                  <button class="button dark" type="button" id="refreshTelemetry">Refresh telemetry</button>
+                </aside>
+              </div>
+
+              <div class="monitoring-strip" id="monitoring" aria-label="Monitoring strip">
+                <strong>Monitoring — last 20 runs</strong>
+                <div>
+                  <span>p50 latency<i class="tone-green"> {{ monitoring.p50_ms }}ms</i></span>
+                  <span>p99 latency<i class="tone-blue"> {{ monitoring.p99_ms }}ms</i></span>
+                  <span>failures<i class="tone-orange"> {{ monitoring.failed }}</i></span>
+                  <span>succeeded<i class="tone-purple"> {{ monitoring.succeeded }}</i></span>
+                  <span>cost<i class="tone-green"> ${{ monitoring.cost_usd }}</i></span>
+                </div>
+              </div>
+
+              <div class="runtime-grid">
+                <section class="runtime-panel">
+                  <div class="panel-title">
+                    <h3>Tool calls</h3>
+                    <span>runtime trace</span>
+                  </div>
+                  <div class="tool-list" id="toolList">
+                    <div class="empty">Tool activity appears during a run.</div>
+                  </div>
+                </section>
+
+                <section class="runtime-panel">
+                  <div class="panel-title">
+                    <h3>Telemetry</h3>
+                    <span>latest events</span>
+                  </div>
+                  <div class="event-list" id="eventList">
+                    {% for event in events|slice:":6" %}
+                      <article>
+                        <strong>{{ event.event_type }}</strong>
+                        <span>{{ event.agent.name }} | {{ event.created_at|date:"H:i:s" }}</span>
+                      </article>
+                    {% empty %}
+                      <div class="empty">No telemetry events yet.</div>
+                    {% endfor %}
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <!-- ── Monitoring dashboard ────────────────────────────────────── -->
+            <section class="platform-view" id="monitoring-view" data-view-panel="monitoring" aria-labelledby="mon-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="mon-title">Monitoring Dashboard</h2>
+                  <p>Cross-agent observability — usage, health, cost and quality</p>
+                </div>
+                <div class="topbar-actions">
+                  <select id="monWindow" class="mon-window-select">
+                    <option value="24h">Last 24h</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d" selected>Last 30 days</option>
+                  </select>
+                  <button class="button dark" id="refreshMonitoring" type="button">↻ Refresh</button>
+                </div>
+              </div>
+
+              <!-- 5-level hierarchy filter bar -->
+              <div class="mon-filter-bar">
+                <label class="mon-filter-field">
+                  <span>Business Unit</span>
+                  <select id="monBU">
+                    <option value="">All BUs</option>
+                    {% for bu in business_units %}
+                      <option value="{{ bu.id }}">{{ bu.name }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <span class="mon-filter-sep">›</span>
+                <label class="mon-filter-field">
+                  <span>Division</span>
+                  <select id="monDivision">
+                    <option value="">All divisions</option>
+                  </select>
+                </label>
+                <span class="mon-filter-sep">›</span>
+                <label class="mon-filter-field">
+                  <span>Work Stream</span>
+                  <select id="monWorkStream">
+                    <option value="">All work streams</option>
+                  </select>
+                </label>
+                <span class="mon-filter-sep">›</span>
+                <label class="mon-filter-field">
+                  <span>Process</span>
+                  <select id="monProcess">
+                    <option value="">All processes</option>
+                  </select>
+                </label>
+                <span class="mon-filter-sep">›</span>
+                <label class="mon-filter-field">
+                  <span>Agent</span>
+                  <select id="monAgent">
+                    <option value="">All agents</option>
+                  </select>
+                </label>
+                <button class="mon-filter-clear" id="monFilterClear" type="button">Clear</button>
+              </div>
+
+              <!-- Tiles -->
+              <div class="mon-tiles" id="monTiles">
+                <article class="mon-tile tone-blue">
+                  <span>Total runs</span>
+                  <strong id="mt-total-runs">—</strong>
+                  <small id="mt-total-runs-delta"></small>
+                </article>
+                <article class="mon-tile tone-green">
+                  <span>Success rate</span>
+                  <strong id="mt-success-rate">—</strong>
+                  <small id="mt-success-rate-sub"></small>
+                </article>
+                <article class="mon-tile tone-cyan">
+                  <span>Active users</span>
+                  <strong id="mt-active-users">—</strong>
+                  <small>unique users</small>
+                </article>
+                <article class="mon-tile tone-orange">
+                  <span>p50 latency</span>
+                  <strong id="mt-p50">—</strong>
+                  <small id="mt-p95">p95: —</small>
+                </article>
+                <article class="mon-tile tone-purple">
+                  <span>p99 latency</span>
+                  <strong id="mt-p99">—</strong>
+                  <small>ms</small>
+                </article>
+                <article class="mon-tile tone-green">
+                  <span>Total cost</span>
+                  <strong id="mt-cost">—</strong>
+                  <small>USD</small>
+                </article>
+                <article class="mon-tile tone-blue">
+                  <span>Tokens</span>
+                  <strong id="mt-tokens">—</strong>
+                  <small id="mt-tokens-sub">in + out</small>
+                </article>
+                <article class="mon-tile tone-orange">
+                  <span>Avg satisfaction</span>
+                  <strong id="mt-satisfaction">—</strong>
+                  <small>/ 5.0</small>
+                </article>
+                <article class="mon-tile tone-purple">
+                  <span>Pending reviews</span>
+                  <strong id="mt-pending">—</strong>
+                  <small>governance queue</small>
+                </article>
+              </div>
+
+              <!-- Charts row 1 -->
+              <div class="mon-charts-row">
+                <div class="mon-chart-card">
+                  <h4>Runs over time</h4>
+                  <canvas id="chartRuns" height="180"></canvas>
+                </div>
+                <div class="mon-chart-card">
+                  <h4>Avg latency trend (ms)</h4>
+                  <canvas id="chartLatency" height="180"></canvas>
+                </div>
+              </div>
+
+              <!-- Charts row 2 -->
+              <div class="mon-charts-row">
+                <div class="mon-chart-card">
+                  <h4>Cost over time (USD)</h4>
+                  <canvas id="chartCost" height="180"></canvas>
+                </div>
+                <div class="mon-chart-card">
+                  <h4>Rating distribution</h4>
+                  <canvas id="chartRatings" height="180"></canvas>
+                </div>
+              </div>
+
+              <!-- Breakdowns row -->
+              <div class="mon-breakdowns">
+                <div class="mon-breakdown-card">
+                  <h4>Runs by platform</h4>
+                  <div id="bdPlatform" class="bd-list"></div>
+                </div>
+                <div class="mon-breakdown-card">
+                  <h4>Runs by agent</h4>
+                  <div id="bdAgent" class="bd-list"></div>
+                </div>
+                <div class="mon-breakdown-card">
+                  <h4>Low-rated runs (≤ 2★)</h4>
+                  <div id="bdLowRated" class="bd-list"></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- ── Agent Catalog ───────────────────────────────────────────── -->
+            <section class="catalog-shell platform-view" id="catalog" data-view-panel="catalog" aria-labelledby="catalog-title">
+              <header class="catalog-topbar">
+                <div class="catalog-title-row">
+                  <h2 id="catalog-title">Agent Catalog</h2>
+                  <div class="catalog-title-actions">
+                    <button class="published-button" id="publishedFilter" type="button" aria-pressed="false">Published</button>
+                    <button class="button primary" id="openRegisterModal" type="button">+ Register agent</button>
+                  </div>
+                </div>
+                <div class="catalog-search-row">
+                  <label class="search-field search-field--wide">
+                    <span class="sr-only">Search catalog</span>
+                    <input id="catalogSearch" type="search" placeholder="Search agents, domains, owners…">
+                  </label>
+                </div>
+              </header>
+
+              <div class="catalog-body">
+                <aside class="filter-rail" aria-label="Find by">
+                  <h3>Find by</h3>
+                  <label class="filter-field">
+                    <span>Business Unit</span>
+                    <select id="filterBU" data-catalog-filter="orgUnit">
+                      <option value="">all</option>
+                      {% for bu in business_units %}
+                        <option value="{{ bu.id }}">{{ bu.name }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Division</span>
+                    <select id="filterDivision" data-catalog-filter="orgDivision">
+                      <option value="">all</option>
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Work Stream</span>
+                    <select id="filterWorkStream" data-catalog-filter="orgWorkStream">
+                      <option value="">all</option>
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Domain</span>
+                    <select data-catalog-filter="domain">
+                      <option value="">all</option>
+                      {% for agent in agents %}
+                        <option value="{{ agent.business_unit }}">{{ agent.business_unit }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Certification</span>
+                    <select data-catalog-filter="certification">
+                      <option value="">all</option>
+                      <option value="certified">Certified</option>
+                      <option value="verified">Verified</option>
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Owner</span>
+                    <select data-catalog-filter="owner">
+                      <option value="">all</option>
+                      {% for agent in agents %}
+                        <option value="{{ agent.owner }}">{{ agent.owner }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Tool access</span>
+                    <select data-catalog-filter="toolAccess">
+                      <option value="">all</option>
+                      {% for agent in agents %}
+                        <option value="{{ agent.platform }}">{{ agent.get_platform_display }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="filter-field">
+                    <span>Data policy</span>
+                    <select data-catalog-filter="dataPolicy">
+                      <option value="">all</option>
+                      <option value="tier-1-2">Tier 1-2 managed</option>
+                      <option value="tier-3">Tier 3 review</option>
+                      <option value="tier-4">Tier 4 restricted</option>
+                    </select>
+                  </label>
+                  <button class="reset-filter" type="button" id="catalogResetFilters">Reset filters</button>
+                </aside>
+
+                <div class="catalog-content">
+                  <div class="catalog-summary">
+                    <strong id="catalogResultCount">{{ metrics.registered_agents }} agents</strong>
+                    <span id="catalogFilterSummary">all catalog entries</span>
+                  </div>
+                  <div class="catalog-table-wrap">
+                    <table class="catalog-table" id="agents">
+                      <thead>
+                        <tr>
+                          <th>Agent</th>
+                          <th>Organisation</th>
+                          <th>Owner</th>
+                          <th>Trust</th>
+                          <th>Status</th>
+                          <th>Use</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {% for agent in agents %}
+                          <tr class="{% if forloop.first %}highlight{% endif %}"
+                              data-domain="{{ agent.business_unit }}"
+                              data-org-unit="{{ agent.org_unit_id|default:'' }}"
+                              data-org-division="{{ agent.org_division_id|default:'' }}"
+                              data-org-work-stream="{{ agent.org_work_stream_id|default:'' }}"
+                              data-certification="{% if agent.risk_tier <= 2 %}certified{% else %}verified{% endif %}"
+                              data-owner="{{ agent.owner }}"
+                              data-tool-access="{{ agent.platform }}"
+                              data-data-policy="{% if agent.risk_tier <= 2 %}tier-1-2{% elif agent.risk_tier == 3 %}tier-3{% else %}tier-4{% endif %}"
+                              data-status="{{ agent.status }}">
+                            <td>
+                              <strong>{{ agent.name }}</strong>
+                              <span>{{ agent.get_platform_display }} · Tier {{ agent.risk_tier }}</span>
+                            </td>
+                            <td>
+                              {% if agent.org_unit %}
+                                <span class="org-crumb">{{ agent.org_unit.name }}</span>
+                                {% if agent.org_division %}
+                                  <span class="org-crumb">{{ agent.org_division.name }}</span>
+                                  {% if agent.org_work_stream %}
+                                    <span class="org-crumb">{{ agent.org_work_stream.name }}</span>
+                                  {% endif %}
+                                {% endif %}
+                              {% else %}
+                                <span class="org-crumb muted">{{ agent.business_unit }}</span>
+                              {% endif %}
+                            </td>
+                            <td>{{ agent.owner }}</td>
+                            <td>
+                              <span class="trust-badge {% if agent.risk_tier <= 2 %}certified{% else %}verified{% endif %}">
+                                {% if agent.risk_tier <= 2 %}Certified{% else %}Verified{% endif %}
+                              </span>
+                            </td>
+                            <td><span class="catalog-status">{{ agent.get_status_display }}</span></td>
+                            <td>
+                              <button class="use-button {% if forloop.first %}dark{% endif %}" type="button">
+                                {% if forloop.first %}Download{% else %}Use{% endif %}
+                              </button>
+                            </td>
+                          </tr>
+                        {% endfor %}
+                        <tr class="catalog-empty-row" id="catalogEmptyRow" hidden>
+                          <td colspan="5">No agents match the selected filters.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <aside class="why-note">
+                    <strong>Why it matters</strong>
+                    <p>The catalog changes agents from one-off projects into managed digital assets: owned, certified, discoverable and ready for reuse.</p>
+                  </aside>
+                </div>
+              </div>
+            </section>
+
+          </div><!-- /.workspace -->
+        </div><!-- /.platform-body -->
+      </section>
+    </main>
+
+    <!-- ── Register Agent Modal ─────────────────────────────────────────── -->
+    <div id="registerModal" class="modal-backdrop" hidden aria-modal="true" role="dialog" aria-labelledby="regModalTitle">
+      <div class="modal-panel">
+        <header class="modal-header">
+          <h2 id="regModalTitle">Register a new agent</h2>
+          <button class="modal-close" id="closeRegisterModal" type="button" aria-label="Close">✕</button>
+        </header>
+
+        <form id="registerAgentForm" class="reg-form" novalidate>
+          {% csrf_token %}
+
+          <div class="reg-section">
+            <h3>Identity</h3>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field req">
+                <span>Agent name</span>
+                <input type="text" name="name" placeholder="e.g. Contract Review Assistant" required>
+              </label>
+              <label class="reg-field req">
+                <span>Platform</span>
+                <select name="platform" required>
+                  <option value="">Select…</option>
+                  {% for val, label in agent_platform_choices %}
+                    <option value="{{ val }}">{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
+            <div class="reg-row reg-row--3">
+              <label class="reg-field req">
+                <span>Kind</span>
+                <select name="kind">
+                  {% for val, label in agent_kind_choices %}
+                    <option value="{{ val }}">{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="reg-field req">
+                <span>Integration mode</span>
+                <select name="integration_mode">
+                  {% for val, label in agent_mode_choices %}
+                    <option value="{{ val }}">{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="reg-field req">
+                <span>Risk tier</span>
+                <select name="risk_tier" required>
+                  <option value="1">Tier 1 — Low risk</option>
+                  <option value="2">Tier 2 — Moderate</option>
+                  <option value="3">Tier 3 — High</option>
+                  <option value="4">Tier 4 — Autonomous / human-in-loop</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="reg-section">
+            <h3>Ownership</h3>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field req">
+                <span>Business owner</span>
+                <input type="text" name="owner" placeholder="Team or person" required>
+              </label>
+              <label class="reg-field">
+                <span>Technical owner</span>
+                <input type="text" name="technical_owner" placeholder="Defaults to business owner">
+              </label>
+            </div>
+          </div>
+
+          <div class="reg-section">
+            <h3>Organisation</h3>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field">
+                <span>Business Unit</span>
+                <select name="org_unit_id" id="regBU">
+                  <option value="">None</option>
+                  {% for bu in business_units %}
+                    <option value="{{ bu.id }}">{{ bu.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label class="reg-field">
+                <span>Division</span>
+                <select name="org_division_id" id="regDivision">
+                  <option value="">None</option>
+                </select>
+              </label>
+            </div>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field">
+                <span>Work Stream</span>
+                <select name="org_work_stream_id" id="regWorkStream">
+                  <option value="">None</option>
+                </select>
+              </label>
+              <label class="reg-field">
+                <span>Process</span>
+                <select name="org_process_id" id="regProcess">
+                  <option value="">None</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="reg-section">
+            <h3>Purpose &amp; configuration</h3>
+            <label class="reg-field req">
+              <span>Purpose</span>
+              <textarea name="purpose" rows="3" placeholder="What does this agent do? Who uses it?" required></textarea>
+            </label>
+            <label class="reg-field">
+              <span>System prompt</span>
+              <textarea name="system_prompt" rows="3" placeholder="Optional — leave blank to configure later."></textarea>
+            </label>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field">
+                <span>Model ID</span>
+                <select name="model_id">
+                  <option value="">Adapter default</option>
+                  <option value="claude-opus-4-8">Claude Opus 4.8</option>
+                  <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
+                  <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+                  <option value="gpt-4o">GPT-4o</option>
+                  <option value="gpt-4o-mini">GPT-4o mini</option>
+                  <option value="azure/gpt-4o">Azure GPT-4o</option>
+                  <option value="bedrock/claude-3-5-sonnet">Bedrock Claude 3.5 Sonnet</option>
+                </select>
+              </label>
+              <label class="reg-field">
+                <span>Endpoint URL</span>
+                <input type="url" name="endpoint_url" placeholder="https://… (external agents only)">
+              </label>
+            </div>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field">
+                <span>Tool names <span class="field-hint">(comma-separated)</span></span>
+                <input type="text" name="tool_names" placeholder="search, summarise, notify">
+              </label>
+              <label class="reg-field">
+                <span>Data sources <span class="field-hint">(comma-separated)</span></span>
+                <input type="text" name="data_sources" placeholder="SharePoint, CRM, Knowledge Base">
+              </label>
+            </div>
+          </div>
+
+          <div id="regFormError" class="reg-form-error" hidden></div>
+
+          <div class="modal-footer">
+            <button class="button secondary" type="button" id="cancelRegisterModal">Cancel</button>
+            <button class="button primary" type="submit" id="regSubmitBtn">Register agent</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+
+    <script src="{% static 'controlplane/platform.js' %}?v=app-ui-3"></script>
+    <script src="{% static 'controlplane/register.js' %}?v=1"></script>
+  </body>
+</html>

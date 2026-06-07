@@ -1,0 +1,390 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Platform Management — REPH</title>
+    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-3">
+    <link rel="stylesheet" href="{% static 'controlplane/manage.css' %}?v=1">
+  </head>
+  <body>
+    <main class="app-page">
+      <section class="platform-app" aria-label="Platform Management">
+
+        <header class="platform-topbar">
+          <strong>Platform Management</strong>
+          <div class="topbar-actions">
+            <a class="admin-button" href="/">← Dashboard</a>
+            <span class="topbar-user">{{ request.user.username }}</span>
+            <form method="post" action="/accounts/logout/" style="display:inline">{% csrf_token %}<button class="admin-button" type="submit">Log out</button></form>
+          </div>
+        </header>
+
+        <div class="platform-body">
+          <nav class="left-rail" aria-label="Management navigation">
+            <button class="active" type="button" data-view-tab="overview">Overview</button>
+            <button type="button" data-view-tab="agents">Agents</button>
+            <button type="button" data-view-tab="governance">
+              Governance
+              {% if pending_count %}<span class="rail-badge">{{ pending_count }}</span>{% endif %}
+            </button>
+            <button type="button" data-view-tab="approvals">
+              Approvals
+              {% if active_approval_count %}<span class="rail-badge rail-badge--green">{{ active_approval_count }}</span>{% endif %}
+            </button>
+            <button type="button" data-view-tab="audit">Audit Log</button>
+          </nav>
+
+          <div class="workspace">
+
+            <!-- ── Overview ──────────────────────────────────────────────── -->
+            <section class="platform-view active" data-view-panel="overview" aria-labelledby="ov-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="ov-title">Overview</h2>
+                  <p>Platform health at a glance</p>
+                </div>
+              </div>
+
+              <div class="mgmt-stat-grid">
+                <div class="mgmt-stat-group">
+                  <h4>Agents by status</h4>
+                  <div class="mgmt-stats">
+                    {% for val, label, count in status_rows %}
+                      <div class="mgmt-stat">
+                        <span class="mgmt-stat-label">{{ label }}</span>
+                        <strong class="mgmt-stat-val status-{{ val }}">{{ count }}</strong>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+
+                <div class="mgmt-stat-group">
+                  <h4>Agents by kind</h4>
+                  <div class="mgmt-stats">
+                    {% for val, label, count in kind_rows %}
+                      <div class="mgmt-stat">
+                        <span class="mgmt-stat-label">{{ label }}</span>
+                        <strong class="mgmt-stat-val">{{ count }}</strong>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+
+                <div class="mgmt-stat-group">
+                  <h4>Integration mode</h4>
+                  <div class="mgmt-stats">
+                    {% for val, label, count in mode_rows %}
+                      <div class="mgmt-stat">
+                        <span class="mgmt-stat-label">{{ label|truncatechars:28 }}</span>
+                        <strong class="mgmt-stat-val">{{ count }}</strong>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+
+                <div class="mgmt-stat-group">
+                  <h4>Action required</h4>
+                  <div class="mgmt-stats">
+                    <div class="mgmt-stat">
+                      <span class="mgmt-stat-label">Pending reviews</span>
+                      <strong class="mgmt-stat-val tone-orange">{{ pending_count }}</strong>
+                    </div>
+                    <div class="mgmt-stat">
+                      <span class="mgmt-stat-label">Active approvals</span>
+                      <strong class="mgmt-stat-val tone-green">{{ active_approval_count }}</strong>
+                    </div>
+                    <div class="mgmt-stat">
+                      <span class="mgmt-stat-label">Tier 4 agents</span>
+                      <strong class="mgmt-stat-val tone-orange">{{ tier4_agents|length }}</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <h3 class="mgmt-section-title">Recent audit activity</h3>
+              <table class="mgmt-table">
+                <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Resource</th><th>IP</th></tr></thead>
+                <tbody>
+                  {% for e in audit_entries|slice:":10" %}
+                    <tr>
+                      <td class="col-time">{{ e.created_at|date:"d M H:i" }}</td>
+                      <td><strong>{{ e.actor }}</strong></td>
+                      <td><span class="action-tag action-{{ e.action }}">{{ e.action }}</span></td>
+                      <td class="col-muted">{{ e.resource_type }} {{ e.resource_id|truncatechars:12 }}</td>
+                      <td class="col-muted">{{ e.ip_address|default:"—" }}</td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="5" class="empty-row">No audit entries yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+            <!-- ── Agents ─────────────────────────────────────────────────── -->
+            <section class="platform-view" data-view-panel="agents" aria-labelledby="ag-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="ag-title">Agents</h2>
+                  <p>{{ agents|length }} registered agents</p>
+                </div>
+                <div class="topbar-actions">
+                  <input id="agentSearch" type="search" class="mgmt-search" placeholder="Search agents…">
+                </div>
+              </div>
+
+              <table class="mgmt-table mgmt-table--agents" id="agentTable">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Kind / Mode</th>
+                    <th>Platform</th>
+                    <th>Organisation</th>
+                    <th>Risk</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for agent in agents %}
+                    <tr data-agent-id="{{ agent.id }}" data-agent-name="{{ agent.name|lower }}">
+                      <td>
+                        <strong>{{ agent.name }}</strong>
+                        <div class="cell-sub">v{{ agent.version }} · {{ agent.owner }}</div>
+                      </td>
+                      <td>
+                        <span class="kind-badge kind-{{ agent.kind }}">{{ agent.get_kind_display }}</span>
+                        <div class="cell-sub">{{ agent.get_integration_mode_display|truncatechars:22 }}</div>
+                      </td>
+                      <td>
+                        <span class="cell-muted">{{ agent.get_platform_display }}</span>
+                      </td>
+                      <td>
+                        {% if agent.org_unit %}<span class="org-crumb">{{ agent.org_unit.name }}</span>{% endif %}
+                        {% if agent.org_division %}<span class="org-crumb">{{ agent.org_division.name }}</span>{% endif %}
+                      </td>
+                      <td>
+                        <span class="risk-badge risk-{{ agent.risk_tier }}">T{{ agent.risk_tier }}</span>
+                      </td>
+                      <td>
+                        <span class="status-dot status-{{ agent.status }}">{{ agent.get_status_display }}</span>
+                      </td>
+                      <td>
+                        <div class="row-actions">
+                          {# Transition buttons are built dynamically by manage.js #}
+                        </div>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+            <!-- ── Governance ─────────────────────────────────────────────── -->
+            <section class="platform-view" data-view-panel="governance" aria-labelledby="gov-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="gov-title">Governance Reviews</h2>
+                  <p>Approve or reject agent reviews to gate production promotion</p>
+                </div>
+              </div>
+
+              {% if pending_reviews %}
+                <h3 class="mgmt-section-title tone-orange">Pending ({{ pending_count }})</h3>
+                <div class="review-cards" id="pendingReviews">
+                  {% for review in pending_reviews %}
+                    <div class="review-card" id="review-{{ review.id }}" data-review-id="{{ review.id }}">
+                      <div class="review-card__header">
+                        <div>
+                          <strong>{{ review.agent.name }}</strong>
+                          <span class="risk-badge risk-{{ review.agent.risk_tier }}">Tier {{ review.agent.risk_tier }}</span>
+                          <span class="kind-badge kind-{{ review.agent.kind }}">{{ review.agent.get_kind_display }}</span>
+                        </div>
+                        <span class="col-time">{{ review.created_at|date:"d M Y H:i" }}</span>
+                      </div>
+                      <div class="review-card__body">
+                        <p class="review-purpose">{{ review.agent.purpose|truncatechars:160 }}</p>
+                        <p class="review-notes">Reviewer: {{ review.reviewer|default:"unassigned" }} {% if review.notes %}· {{ review.notes }}{% endif %}</p>
+                      </div>
+                      <div class="review-card__actions">
+                        <input class="review-notes-input" type="text" placeholder="Optional decision notes…" id="notes-{{ review.id }}">
+                        <button class="action-btn action-btn--approve"
+                                data-action="governance-decide"
+                                data-review-id="{{ review.id }}"
+                                data-decision="approved">✓ Approve</button>
+                        <button class="action-btn action-btn--reject"
+                                data-action="governance-decide"
+                                data-review-id="{{ review.id }}"
+                                data-decision="rejected">✗ Reject</button>
+                      </div>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="empty-state">
+                  <strong>No pending reviews</strong>
+                  <p>All governance reviews have been actioned.</p>
+                </div>
+              {% endif %}
+
+              <h3 class="mgmt-section-title" style="margin-top:32px">Recent decisions</h3>
+              <table class="mgmt-table">
+                <thead><tr><th>Agent</th><th>Decision</th><th>Reviewer</th><th>Notes</th><th>Date</th></tr></thead>
+                <tbody>
+                  {% for review in recent_reviews %}
+                    <tr>
+                      <td><strong>{{ review.agent.name }}</strong></td>
+                      <td><span class="status-dot status-{{ review.status }}">{{ review.get_status_display }}</span></td>
+                      <td>{{ review.reviewer }}</td>
+                      <td class="col-muted">{{ review.notes|default:"—"|truncatechars:60 }}</td>
+                      <td class="col-time">{{ review.completed_at|date:"d M Y"|default:"—" }}</td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="5" class="empty-row">No completed reviews.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+            <!-- ── Approvals ──────────────────────────────────────────────── -->
+            <section class="platform-view" data-view-panel="approvals" aria-labelledby="ap-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="ap-title">Tier 4 Approvals</h2>
+                  <p>Grant a time-limited server-side approval for a Tier 4 agent run</p>
+                </div>
+              </div>
+
+              <div class="approval-layout">
+                <!-- Create approval form -->
+                <div class="approval-form-card">
+                  <h3>Grant new approval</h3>
+                  <p class="form-hint">Only Tier 4 agents require a pre-approval. Each approval is single-use and expires after the specified window.</p>
+                  <form id="approvalForm" class="mgmt-form">
+                    <label>
+                      <span>Agent</span>
+                      <select id="approvalAgent" required>
+                        <option value="">Select a Tier 4 agent…</option>
+                        {% for agent in tier4_agents %}
+                          <option value="{{ agent.id }}">{{ agent.name }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Valid for (hours)</span>
+                      <input type="number" id="approvalTTL" value="8" min="1" max="72">
+                    </label>
+                    <label>
+                      <span>Notes (optional)</span>
+                      <input type="text" id="approvalNotes" placeholder="Reason for approval…">
+                    </label>
+                    <button class="button primary" type="submit">Grant approval</button>
+                    <div id="approvalResult" class="form-result"></div>
+                  </form>
+                </div>
+
+                <!-- Active approvals -->
+                <div class="approval-list-card">
+                  <h3>Active approvals <span class="count-badge">{{ active_approval_count }}</span></h3>
+                  <div id="activeApprovalsList">
+                    {% for approval in active_approvals %}
+                      <div class="approval-item">
+                        <div class="approval-item__main">
+                          <strong>{{ approval.agent.name }}</strong>
+                          <span class="risk-badge risk-{{ approval.agent.risk_tier }}">T{{ approval.agent.risk_tier }}</span>
+                        </div>
+                        <div class="approval-item__meta">
+                          Approved by <strong>{{ approval.approved_by_username }}</strong> ·
+                          Expires {{ approval.expires_at|date:"d M H:i" }} ·
+                          {% if approval.notes %}<em>{{ approval.notes }}</em>{% endif %}
+                        </div>
+                      </div>
+                    {% empty %}
+                      <p class="empty-row">No active approvals.</p>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+
+              <h3 class="mgmt-section-title" style="margin-top:32px">Recent approvals history</h3>
+              <table class="mgmt-table">
+                <thead><tr><th>Agent</th><th>Granted by</th><th>Notes</th><th>Expires</th><th>Consumed</th></tr></thead>
+                <tbody>
+                  {% for approval in recent_approvals %}
+                    <tr>
+                      <td><strong>{{ approval.agent.name }}</strong></td>
+                      <td>{{ approval.approved_by_username }}</td>
+                      <td class="col-muted">{{ approval.notes|default:"—"|truncatechars:50 }}</td>
+                      <td class="col-time">{{ approval.expires_at|date:"d M H:i" }}</td>
+                      <td>
+                        {% if approval.is_consumed %}
+                          <span class="status-dot status-retired">Used</span>
+                        {% else %}
+                          <span class="status-dot status-production">Active</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="5" class="empty-row">No approval history.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+            <!-- ── Audit Log ───────────────────────────────────────────────── -->
+            <section class="platform-view" data-view-panel="audit" aria-labelledby="au-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="au-title">Audit Log</h2>
+                  <p>Append-only record of privileged actions · showing last 100 entries</p>
+                </div>
+                <div class="topbar-actions">
+                  <input id="auditSearch" type="search" class="mgmt-search" placeholder="Filter by actor or action…">
+                </div>
+              </div>
+
+              <table class="mgmt-table" id="auditTable">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Actor</th>
+                    <th>Action</th>
+                    <th>Resource</th>
+                    <th>IP</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for e in audit_entries %}
+                    <tr data-audit-text="{{ e.actor|lower }} {{ e.action|lower }} {{ e.resource_type|lower }}">
+                      <td class="col-time">{{ e.created_at|date:"d M Y H:i:s" }}</td>
+                      <td><strong>{{ e.actor }}</strong></td>
+                      <td><span class="action-tag action-{{ e.action }}">{{ e.action }}</span></td>
+                      <td class="col-muted">{{ e.resource_type }} <code>{{ e.resource_id|truncatechars:14 }}</code></td>
+                      <td class="col-muted">{{ e.ip_address|default:"—" }}</td>
+                      <td>
+                        <button class="action-btn action-btn--sm action-btn--ghost"
+                                onclick="togglePayload(this)"
+                                data-payload="{{ e.payload|default:'{}' }}">···</button>
+                        <pre class="payload-pre" hidden>{{ e.payload }}</pre>
+                      </td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="6" class="empty-row">No audit entries yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </section>
+
+          </div><!-- /.workspace -->
+        </div><!-- /.platform-body -->
+      </section>
+    </main>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+
+    <script src="{% static 'controlplane/platform.js' %}?v=app-ui-3"></script>
+    <script src="{% static 'controlplane/manage.js' %}?v=1"></script>
+  </body>
+</html>

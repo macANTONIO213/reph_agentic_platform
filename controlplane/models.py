@@ -1,0 +1,409 @@
+import uuid
+
+from django.contrib.auth.models import User
+from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db import models
+from django.utils import timezone
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Organisational hierarchy  (configurable via Django admin)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BusinessUnit(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120, unique=True)
+    code = models.SlugField(unique=True)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Division(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business_unit = models.ForeignKey(
+        BusinessUnit, on_delete=models.CASCADE,
+        related_name="divisions", null=True, blank=True,
+        help_text="Leave blank if this division spans all business units.",
+    )
+    name = models.CharField(max_length=120)
+    code = models.SlugField()
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = [("business_unit", "code")]
+
+    def __str__(self):
+        if self.business_unit_id:
+            return f"{self.business_unit.name} / {self.name}"
+        return self.name
+
+
+class WorkStream(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    division = models.ForeignKey(
+        Division, on_delete=models.CASCADE, related_name="work_streams"
+    )
+    name = models.CharField(max_length=120)
+    code = models.SlugField()
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = [("division", "code")]
+
+    def __str__(self):
+        return f"{self.division.name} / {self.name}"
+
+
+class OrgProcess(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    work_stream = models.ForeignKey(
+        WorkStream, on_delete=models.CASCADE, related_name="processes"
+    )
+    name = models.CharField(max_length=120)
+    code = models.SlugField()
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = [("work_stream", "code")]
+        verbose_name = "Process"
+        verbose_name_plural = "Processes"
+
+    def __str__(self):
+        return f"{self.work_stream.name} / {self.name}"
+
+
+class Agent(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        REVIEW = "review", "Review"
+        PILOT = "pilot", "Pilot"
+        PRODUCTION = "production", "Production"
+        RETIRED = "retired", "Retired"
+
+    class Kind(models.TextChoices):
+        CUSTOM = "custom", "Custom (first-party)"
+        EXTERNAL = "external", "External"
+
+    class IntegrationMode(models.TextChoices):
+        SDK = "sdk", "SDK / Callback (full governance)"
+        PROXY = "proxy", "Proxy / Endpoint (medium governance)"
+        ATTESTATION = "attestation", "Attestation-only (registered)"
+
+    class Platform(models.TextChoices):
+        DJANGO = "django_runtime", "Django Runtime"
+        AZURE_AI = "azure_ai_foundry", "Azure AI Foundry / Azure OpenAI"
+        COPILOT = "copilot_studio", "Microsoft Copilot Studio"
+        BEDROCK = "bedrock", "AWS Bedrock"
+        CUSTOM = "custom_api", "Custom API Agent"
+        VENDOR = "vendor", "Vendor Platform"
+        EMBEDDED = "embedded", "Internal App Embed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(unique=True)
+    name = models.CharField(max_length=160)
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.EXTERNAL)
+    integration_mode = models.CharField(
+        max_length=20, choices=IntegrationMode.choices, default=IntegrationMode.PROXY,
+        help_text="How this agent connects to the control plane (determines governance fidelity).",
+    )
+    platform = models.CharField(max_length=40, choices=Platform.choices)
+    business_unit = models.CharField(max_length=80)
+    owner = models.CharField(max_length=120)
+    technical_owner = models.CharField(max_length=120)
+    purpose = models.TextField()
+    system_prompt = models.TextField()
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.REVIEW)
+    risk_tier = models.PositiveSmallIntegerField(
+        default=1, validators=[MinValueValidator(1), MaxValueValidator(4)]
+    )
+    version = models.CharField(max_length=20, default="1.0")
+    endpoint_url = models.URLField(blank=True, default="")
+    model_id = models.CharField(max_length=80, blank=True, default="", help_text="Override the adapter's default model (e.g. gpt-4o, claude-opus-4-8)")
+    org_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="agents", verbose_name="Business unit",
+    )
+    org_division = models.ForeignKey(
+        "Division", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="agents", verbose_name="Division",
+    )
+    org_work_stream = models.ForeignKey(
+        "WorkStream", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="agents", verbose_name="Work stream",
+    )
+    org_process = models.ForeignKey(
+        "OrgProcess", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="agents", verbose_name="Process",
+    )
+    data_sources = models.JSONField(default=list, blank=True)
+    tool_names = models.JSONField(default=list, blank=True)
+    telemetry_enabled = models.BooleanField(default=True)
+    monthly_active_users = models.PositiveIntegerField(default=0)
+    monthly_runs = models.PositiveIntegerField(default=0)
+    monthly_cost_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    satisfaction_score = models.DecimalField(max_digits=4, decimal_places=2, default=0)
+    deployed_at = models.DateTimeField(null=True, blank=True)
+    next_review_at = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    ALLOWED_TRANSITIONS: dict = {
+        "draft": {"review"},
+        "review": {"draft", "pilot"},
+        "pilot": {"review", "production"},
+        "production": {"pilot", "retired"},
+        "retired": set(),
+    }
+
+    @property
+    def is_live(self):
+        return self.status in {self.Status.PILOT, self.Status.PRODUCTION}
+
+    @property
+    def governance_level(self) -> str:
+        return {"sdk": "full", "proxy": "medium", "attestation": "attested"}.get(
+            self.integration_mode, "attested"
+        )
+
+    def can_transition_to(self, new_status: str) -> bool:
+        return new_status in self.ALLOWED_TRANSITIONS.get(self.status, set())
+
+    def transition_to(self, new_status: str, bypass_governance: bool = False) -> None:
+        if not self.can_transition_to(new_status):
+            allowed = self.ALLOWED_TRANSITIONS.get(self.status, set())
+            raise ValueError(
+                f"Cannot transition '{self.name}' from '{self.status}' to '{new_status}'. "
+                f"Allowed next states: {sorted(allowed) or 'none'}."
+            )
+        if new_status == self.Status.PRODUCTION and not bypass_governance:
+            has_approval = self.governance_reviews.filter(
+                status=GovernanceReview.Status.APPROVED
+            ).exists()
+            if not has_approval:
+                raise ValueError(
+                    f"Cannot promote '{self.name}' to production: "
+                    "an approved governance review is required. "
+                    "Create and approve a GovernanceReview first."
+                )
+        self.status = new_status
+        if new_status == self.Status.PRODUCTION:
+            self.deployed_at = self.deployed_at or timezone.now()
+            self.save(update_fields=["status", "deployed_at", "updated_at"])
+            self._snapshot_version()
+        else:
+            self.save(update_fields=["status", "deployed_at", "updated_at"])
+
+    def _snapshot_version(self) -> None:
+        AgentVersion.objects.create(
+            agent=self,
+            version=self.version,
+            system_prompt=self.system_prompt,
+            tool_names=self.tool_names,
+            model_id=self.model_id,
+        )
+
+    def mark_deployed(self):
+        self.transition_to(self.Status.PRODUCTION)
+
+
+class AgentRun(models.Model):
+    class Status(models.TextChoices):
+        STARTED = "started", "Started"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="runs")
+    user_label = models.CharField(max_length=120, default="demo_user")
+    channel = models.CharField(max_length=40, default="web")
+    input_text = models.TextField()
+    output_text = models.TextField(blank=True)
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.STARTED)
+    latency_ms = models.PositiveIntegerField(default=0)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    model_id = models.CharField(max_length=60, blank=True, default="")
+    cost_usd = models.DecimalField(max_digits=12, decimal_places=6, default=0,
+                                   help_text="Stored at run completion via pricing.price_run()")
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.agent.name} run {self.id}"
+
+
+class AgentToolCall(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(AgentRun, on_delete=models.CASCADE, related_name="tool_calls")
+    tool_name = models.CharField(max_length=80)
+    input_payload = models.JSONField(default=dict, blank=True)
+    output_payload = models.JSONField(default=dict, blank=True)
+    duration_ms = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.tool_name} for {self.run_id}"
+
+
+class TelemetryEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True)
+    run = models.ForeignKey(AgentRun, on_delete=models.SET_NULL, null=True, blank=True)
+    event_type = models.CharField(max_length=80)
+    actor = models.CharField(max_length=120, default="demo_user")
+    business_unit = models.CharField(max_length=80, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.event_type
+
+
+class GovernanceReview(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="governance_reviews")
+    reviewer = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.agent.name} review ({self.status})"
+
+
+class AgentFeedback(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(AgentRun, on_delete=models.CASCADE, related_name="feedback")
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    comment = models.TextField(blank=True)
+    submitted_by = models.CharField(max_length=120)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.rating}/5 for run {self.run_id}"
+
+
+class AgentVersion(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="versions")
+    version = models.CharField(max_length=20)
+    system_prompt = models.TextField()
+    tool_names = models.JSONField(default=list)
+    model_id = models.CharField(max_length=60, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.agent.name} v{self.version}"
+
+
+class ConversationSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="sessions")
+    user_label = models.CharField(max_length=120)
+    messages = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Session {self.id} ({self.agent.name})"
+
+
+class Approval(models.Model):
+    """Server-side approval record required for Tier-4 agent execution.
+    Created by a user with the 'agent_approver' group (or staff).
+    Single-use: consumed when a Tier-4 run is executed.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="approvals")
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name="approvals_granted"
+    )
+    approved_by_username = models.CharField(max_length=120)
+    scope = models.CharField(max_length=120, default="tier4_execution")
+    notes = models.TextField(blank=True)
+    expires_at = models.DateTimeField(help_text="Approval is invalid after this time.")
+    is_consumed = models.BooleanField(default=False, help_text="Set to true once used for a run.")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Approval for {self.agent.name} by {self.approved_by_username}"
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.is_consumed and timezone.now() < self.expires_at
+
+
+class AuditLog(models.Model):
+    """Append-only record of every privileged action on the platform."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.CharField(max_length=120)
+    action = models.CharField(max_length=80)
+    resource_type = models.CharField(max_length=60, blank=True)
+    resource_id = models.CharField(max_length=60, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.actor} · {self.action} · {self.created_at:%Y-%m-%d %H:%M}"
