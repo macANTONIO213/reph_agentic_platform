@@ -113,14 +113,16 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-_render_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
-if _render_hostname:
-    ALLOWED_HOSTS.append(_render_hostname)
-    CSRF_TRUSTED_ORIGINS.append(f"https://{_render_hostname}")
-
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# CSRF trusted origins — must be defined before the Render hostname block appends to it
 CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8765",
     "http://localhost:8765",
 ]
+
+# Render: auto-add the public hostname to ALLOWED_HOSTS and CSRF origins
+_render_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+if _render_hostname:
+    ALLOWED_HOSTS.append(_render_hostname)
+    CSRF_TRUSTED_ORIGINS.append(f"https://{_render_hostname}")
