@@ -22,6 +22,7 @@ from django.utils import timezone
 
 from controlplane.models import Agent, AgentRun, ConversationSession, TelemetryEvent
 from controlplane.services.pricing import price_run
+from controlplane.services.guardrails import guardrails, GuardrailBlock
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,37 @@ class PlatformAgentRuntime:
 
         try:
             yield RuntimeEvent("status", {"run_id": str(run.id), "message": "Run started"}).to_sse()
+
+            # ── Guardrail scan ────────────────────────────────────────────────
+            try:
+                findings = guardrails.scan(
+                    message=message,
+                    agent=self.agent,
+                    actor=self.user_label,
+                    run_id=str(run.id),
+                    ip=None,
+                )
+                if findings:
+                    yield RuntimeEvent("guardrail", {
+                        "run_id": str(run.id),
+                        "findings": [
+                            {"rule": f.rule_id, "severity": f.severity, "detail": f.detail}
+                            for f in findings
+                        ],
+                    }).to_sse()
+            except GuardrailBlock as exc:
+                run.status = AgentRun.Status.FAILED
+                run.output_text = "Run blocked by content guardrails."
+                run.completed_at = timezone.now()
+                run.latency_ms = int((time.perf_counter() - started) * 1000)
+                run.save(update_fields=["status", "output_text", "completed_at", "latency_ms"])
+                yield RuntimeEvent("error", {
+                    "message": "Your message was blocked by content guardrails. Please rephrase.",
+                    "blocked": True,
+                    "rules": [f.rule_id for f in exc.findings],
+                }).to_sse()
+                return
+            # ─────────────────────────────────────────────────────────────────
 
             history = list(session.messages) if session and session.messages else []
             meta = {"output_text": "", "input_tokens": 0, "output_tokens": 0, "model_id": ""}

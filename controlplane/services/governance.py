@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from controlplane.models import Agent, AgentVersion, Approval, AuditLog, GovernanceReview
+from controlplane.models import Agent, AgentVersion, Approval, AuditLog, BusinessUnit, GovernanceReview
 
 
 class RegistrationError(ValueError):
@@ -76,6 +76,29 @@ class GovernanceService:
         Raises RegistrationError on validation failure.
         """
         self._validate_registration(data)
+
+        # ── B1: Tenant scoping — builders may only register in their own BU ──
+        self._require_role(actor, {"agent_builder", "agent_approver", "platform_admin"})
+        org_unit_id = data.get("org_unit_id") or None
+        if org_unit_id and not (actor.is_staff or actor.is_superuser):
+            from controlplane.models import UserProfile as _UP
+            profile_row = _UP.objects.filter(user=actor).select_related("business_unit").first()
+            is_cross = (
+                profile_row is None
+                or profile_row.role == "platform_admin"
+                or actor.groups.filter(name="platform_admin").exists()
+            )
+            if not is_cross:
+                target_bu = BusinessUnit.objects.filter(pk=org_unit_id).first()
+                actor_bu_id = profile_row.business_unit_id if profile_row else None
+                if target_bu and actor_bu_id != target_bu.pk:
+                    actor_bu_name = profile_row.business_unit.name if (profile_row and profile_row.business_unit) else "None"
+                    raise RegistrationError(
+                        f"You do not have permission to register agents in "
+                        f"business unit '{target_bu.name}'. "
+                        f"Your home BU is '{actor_bu_name}'."
+                    )
+        # ─────────────────────────────────────────────────────────────────────
 
         slug = data.get("slug") or self._make_slug(data["name"])
         if Agent.objects.filter(slug=slug).exists():
@@ -303,8 +326,17 @@ class GovernanceService:
     def _require_role(actor, roles: set) -> None:
         if actor.is_staff or actor.is_superuser:
             return
+        # Check Django groups (legacy path)
         if actor.groups.filter(name__in=roles).exists():
             return
+        # Check UserProfile.role (B1 path) — query DB directly to avoid cache
+        try:
+            from controlplane.models import UserProfile
+            profile_role = UserProfile.objects.filter(user=actor).values_list("role", flat=True).first()
+            if profile_role and profile_role in roles:
+                return
+        except Exception:
+            pass
         raise PermissionError(
             f"Action requires one of these roles: {sorted(roles)}. "
             f"User '{actor.username}' does not have them."

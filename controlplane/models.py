@@ -158,6 +158,16 @@ class Agent(models.Model):
     data_sources = models.JSONField(default=list, blank=True)
     tool_names = models.JSONField(default=list, blank=True)
     telemetry_enabled = models.BooleanField(default=True)
+    guardrail_level = models.CharField(
+        max_length=10,
+        choices=[
+            ("off",   "Off — log only, never block"),
+            ("warn",  "Warn — flag finding, continue run"),
+            ("block", "Block — abort run on HIGH findings"),
+        ],
+        default="block",
+        help_text="Content guardrail enforcement level for this agent.",
+    )
     monthly_active_users = models.PositiveIntegerField(default=0)
     monthly_runs = models.PositiveIntegerField(default=0)
     monthly_cost_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -389,6 +399,101 @@ class Approval(models.Model):
     @property
     def is_valid(self) -> bool:
         return not self.is_consumed and timezone.now() < self.expires_at
+
+
+class UserProfile(models.Model):
+    """
+    Extends Django's built-in User with tenant scoping.
+
+    Every user is assigned to a home BusinessUnit (their "tenant").
+    Platform admins and staff are cross-tenant — they see all agents.
+    Builders are scoped: they may only register and manage agents within
+    their own business unit.
+
+    Created automatically via post_save signal when a new User is saved.
+    """
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="profile"
+    )
+    business_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="members",
+        help_text="Home business unit for tenant scoping. Leave blank for cross-tenant (staff/admin) users.",
+    )
+    role = models.CharField(
+        max_length=30,
+        choices=[
+            ("viewer",          "Viewer — read-only across assigned BU"),
+            ("agent_builder",   "Agent Builder — register/edit agents in own BU"),
+            ("agent_approver",  "Agent Approver — approve governance reviews"),
+            ("platform_admin",  "Platform Admin — full cross-tenant access"),
+        ],
+        default="viewer",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["user__username"]
+
+    def __str__(self):
+        bu = self.business_unit.name if self.business_unit else "cross-tenant"
+        return f"{self.user.username} ({self.role} @ {bu})"
+
+    @property
+    def is_cross_tenant(self) -> bool:
+        """Staff, superusers, and platform_admins bypass BU scoping."""
+        # Refresh role from DB to avoid Django related-object cache stale reads
+        current_role = (
+            UserProfile.objects.filter(pk=self.pk).values_list("role", flat=True).first()
+            if self.pk else self.role
+        )
+        return (
+            self.user.is_staff
+            or self.user.is_superuser
+            or current_role == "platform_admin"
+            or self.user.groups.filter(name="platform_admin").exists()
+        )
+
+    def can_access_agent(self, agent: "Agent") -> bool:
+        """Return True if this user's tenant scope covers the given agent."""
+        if self.is_cross_tenant:
+            return True
+        # Refresh BU from DB to avoid cache staleness
+        current_bu_id = (
+            UserProfile.objects.filter(pk=self.pk).values_list("business_unit_id", flat=True).first()
+            if self.pk else self.business_unit_id
+        )
+        if current_bu_id is None:
+            return False
+        # Agent scoped via FK — compare PKs
+        agent_bu_id = agent.org_unit_id or (agent.org_unit.pk if agent.org_unit else None)
+        if agent_bu_id is not None:
+            return agent_bu_id == current_bu_id
+        # Fall back to legacy text field — load BU name
+        bu_name = BusinessUnit.objects.filter(pk=current_bu_id).values_list("name", flat=True).first()
+        return agent.business_unit == bu_name
+
+    def can_register_in(self, business_unit: "BusinessUnit") -> bool:
+        """Return True if this user may register agents in the given BU."""
+        if self.is_cross_tenant:
+            return True
+        if self.role not in {"agent_builder", "agent_approver"}:
+            return False
+        return self.business_unit_id == business_unit.pk
+
+
+# ── Signal: auto-create UserProfile on new User ──────────────────────────────
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+@receiver(post_save, sender=User)
+def _create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        UserProfile.objects.get_or_create(user=instance)
 
 
 class AuditLog(models.Model):

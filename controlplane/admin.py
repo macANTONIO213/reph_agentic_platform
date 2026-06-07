@@ -6,7 +6,7 @@ from .models import (
     Agent, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
     Approval, AuditLog,
     BusinessUnit, ConversationSession, Division, GovernanceReview,
-    OrgProcess, TelemetryEvent, WorkStream,
+    OrgProcess, TelemetryEvent, UserProfile, WorkStream,
 )
 from .services.governance import governance, TransitionError
 
@@ -178,7 +178,7 @@ class AgentAdmin(admin.ModelAdmin):
         }),
         ("Configuration", {
             "fields": ("purpose", "system_prompt", "model_id", "endpoint_url",
-                       "data_sources", "tool_names", "telemetry_enabled"),
+                       "data_sources", "tool_names", "telemetry_enabled", "guardrail_level"),
             "description": "model_id and tool_names are read-only; change via GovernanceService.",
         }),
         ("Metrics", {
@@ -353,3 +353,18 @@ class AuditLogAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+# ── B1: User profiles (tenant scoping) ────────────────────────────────────────
+
+@admin.register(UserProfile)
+class UserProfileAdmin(admin.ModelAdmin):
+    list_display  = ("user", "role", "business_unit", "is_cross_tenant_display", "created_at")
+    list_filter   = ("role", "business_unit")
+    search_fields = ("user__username", "user__email", "business_unit__name")
+    autocomplete_fields = ("business_unit",)
+    fields        = ("user", "role", "business_unit")
+
+    @admin.display(boolean=True, description="Cross-tenant?")
+    def is_cross_tenant_display(self, obj):
+        return obj.is_cross_tenant
