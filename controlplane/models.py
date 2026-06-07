@@ -172,6 +172,15 @@ class Agent(models.Model):
         default=False,
         help_text="Set by compute_baselines management command when satisfaction drops >20% below 7-day baseline.",
     )
+    # D1: Budget controls
+    budget_usd_monthly = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Monthly spend cap in USD. Null = no cap. Checked by compute_budgets command.",
+    )
+    budget_alert = models.BooleanField(
+        default=False,
+        help_text="Set by compute_budgets when monthly_cost_usd exceeds budget_usd_monthly.",
+    )
     monthly_active_users = models.PositiveIntegerField(default=0)
     monthly_runs = models.PositiveIntegerField(default=0)
     monthly_cost_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -781,6 +790,82 @@ class EvalRun(models.Model):
             )
             self.passed = self.pass_rate >= float(self.suite.pass_threshold)
         self.save(update_fields=["pass_rate", "passed"])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase D — Observability & Cost controls
+# ──────────────────────────────────────────────────────────────────────────────
+
+class OtelSpan(models.Model):
+    """
+    Lightweight OpenTelemetry-compatible span record.
+
+    Each AgentRun produces a root span plus child spans for tool calls,
+    guardrail scans, and eval gates.  Spans are written by TelemetryService
+    and can be exported to any OTLP collector via the export_spans command.
+    """
+    class Kind(models.TextChoices):
+        SERVER   = "SERVER",   "Server"
+        CLIENT   = "CLIENT",   "Client"
+        INTERNAL = "INTERNAL", "Internal"
+        CONSUMER = "CONSUMER", "Consumer"
+        PRODUCER = "PRODUCER", "Producer"
+
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    trace_id      = models.CharField(max_length=32, db_index=True)
+    span_id       = models.CharField(max_length=16)
+    parent_span_id= models.CharField(max_length=16, blank=True, default="")
+    name          = models.CharField(max_length=120)
+    kind          = models.CharField(max_length=12, choices=Kind.choices, default=Kind.INTERNAL)
+    # Wall-clock times stored as ISO strings so they survive SQLite→Postgres migration
+    start_time    = models.DateTimeField()
+    end_time      = models.DateTimeField(null=True, blank=True)
+    duration_ms   = models.PositiveIntegerField(default=0)
+    status_code   = models.CharField(max_length=12, default="OK")   # OK | ERROR | UNSET
+    status_message= models.TextField(blank=True, default="")
+    attributes    = models.JSONField(default=dict, blank=True)
+    # Foreign-key shortcuts for querying
+    agent         = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name="spans")
+    run           = models.ForeignKey("AgentRun", on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name="spans")
+    exported      = models.BooleanField(default=False,
+                                        help_text="True once forwarded to an OTLP collector.")
+    created_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["start_time"]
+        indexes = [
+            models.Index(fields=["trace_id", "start_time"]),
+            models.Index(fields=["agent", "start_time"]),
+            models.Index(fields=["exported"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.duration_ms} ms)"
+
+
+class BudgetAlert(models.Model):
+    """
+    Records a budget breach event for an agent.  Created by compute_budgets
+    management command.  One record per calendar month per agent breach.
+    """
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent         = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="budget_alerts")
+    period_month  = models.CharField(max_length=7,
+                                     help_text="YYYY-MM of the breached month.")
+    budget_usd    = models.DecimalField(max_digits=10, decimal_places=2)
+    actual_usd    = models.DecimalField(max_digits=10, decimal_places=2)
+    overage_usd   = models.DecimalField(max_digits=10, decimal_places=2)
+    resolved      = models.BooleanField(default=False)
+    created_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = [("agent", "period_month")]
+
+    def __str__(self):
+        return f"{self.agent.name} budget breach {self.period_month} (+${self.overage_usd})"
 
 
 class AuditLog(models.Model):

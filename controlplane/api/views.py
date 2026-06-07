@@ -686,3 +686,106 @@ def connectors_list(request):
             for c in qs
         ]
     })
+
+
+# ── D1: Prometheus metrics ────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def prometheus_metrics(request):
+    """
+    GET /api/v1/metrics/
+
+    Returns Prometheus text exposition format.
+    Protect with HTTP Basic Auth or restrict to internal IPs in production.
+    Render: allow Grafana Cloud scraper to hit this endpoint.
+    """
+    from controlplane.services.metrics import render_metrics
+    from django.http import HttpResponse
+    payload = render_metrics()
+    return HttpResponse(payload, content_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+# ── D2: OTel spans ────────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def otel_spans(request):
+    """
+    GET /api/v1/spans/?run_id=&agent_id=&limit=50
+
+    Returns spans for a specific run or agent (most recent first).
+    Used by the dashboard trace viewer.
+    """
+    from controlplane.models import OtelSpan
+    qs = OtelSpan.objects.select_related("agent").order_by("start_time")
+
+    run_id = request.GET.get("run_id")
+    agent_id = request.GET.get("agent_id")
+    trace_id = request.GET.get("trace_id")
+
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    if agent_id:
+        qs = qs.filter(agent_id=agent_id)
+    if trace_id:
+        qs = qs.filter(trace_id=trace_id)
+
+    limit = min(int(request.GET.get("limit", 100)), 500)
+    spans = list(qs[:limit])
+
+    return JsonResponse({
+        "spans": [
+            {
+                "span_id":       s.span_id,
+                "trace_id":      s.trace_id,
+                "parent_span_id":s.parent_span_id,
+                "name":          s.name,
+                "kind":          s.kind,
+                "start_time":    s.start_time.isoformat() if s.start_time else None,
+                "end_time":      s.end_time.isoformat() if s.end_time else None,
+                "duration_ms":   s.duration_ms,
+                "status_code":   s.status_code,
+                "status_message":s.status_message,
+                "attributes":    s.attributes,
+                "agent_slug":    s.agent.slug if s.agent else None,
+            }
+            for s in spans
+        ],
+        "count": len(spans),
+    })
+
+
+# ── D3: Budget alerts ─────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def budget_alerts(request):
+    """
+    GET /api/v1/budget-alerts/?resolved=false
+
+    Returns active (or all) budget breach alerts.
+    """
+    from controlplane.models import BudgetAlert
+    qs = BudgetAlert.objects.select_related("agent").order_by("-created_at")
+    if request.GET.get("resolved", "false").lower() == "false":
+        qs = qs.filter(resolved=False)
+    limit = min(int(request.GET.get("limit", 50)), 200)
+    alerts = list(qs[:limit])
+    return JsonResponse({
+        "alerts": [
+            {
+                "id":           str(a.id),
+                "agent_slug":   a.agent.slug,
+                "agent_name":   a.agent.name,
+                "period_month": a.period_month,
+                "budget_usd":   float(a.budget_usd),
+                "actual_usd":   float(a.actual_usd),
+                "overage_usd":  float(a.overage_usd),
+                "resolved":     a.resolved,
+                "created_at":   a.created_at.isoformat(),
+            }
+            for a in alerts
+        ],
+        "count": len(alerts),
+    })

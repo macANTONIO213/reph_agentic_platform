@@ -4,10 +4,10 @@ from django.utils.html import format_html
 
 from .models import (
     Agent, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
-    Approval, AuditLog,
+    Approval, AuditLog, BudgetAlert,
     BusinessUnit, ConversationSession, DataConnector, Division,
     DocumentChunk, EvalCase, EvalRun, EvalSuite,
-    GovernanceReview, KnowledgeDocument, OrgProcess,
+    GovernanceReview, KnowledgeDocument, OrgProcess, OtelSpan,
     TelemetryEvent, UserProfile, WorkStream,
 )
 from .services.governance import governance, TransitionError
@@ -508,3 +508,34 @@ class DataConnectorAdmin(admin.ModelAdmin):
     search_fields = ("name", "description")
     fields        = ("name", "connector_type", "business_unit", "description",
                      "config", "is_active", "created_by")
+
+
+# ── D1: OTel spans ────────────────────────────────────────────────────────────
+
+@admin.register(OtelSpan)
+class OtelSpanAdmin(admin.ModelAdmin):
+    list_display  = ("name", "trace_id_short", "status_code", "duration_ms",
+                     "agent", "start_time", "exported")
+    list_filter   = ("status_code", "kind", "exported", "agent")
+    search_fields = ("name", "trace_id", "span_id")
+    readonly_fields = ("id", "trace_id", "span_id", "parent_span_id",
+                       "start_time", "end_time", "duration_ms", "attributes",
+                       "agent", "run", "created_at")
+    ordering      = ("-start_time",)
+
+    def trace_id_short(self, obj):
+        return obj.trace_id[:12] + "…"
+    trace_id_short.short_description = "Trace"
+
+
+# ── D2: Budget alerts ─────────────────────────────────────────────────────────
+
+@admin.register(BudgetAlert)
+class BudgetAlertAdmin(admin.ModelAdmin):
+    list_display  = ("agent", "period_month", "budget_usd", "actual_usd",
+                     "overage_usd", "resolved", "created_at")
+    list_filter   = ("resolved", "period_month")
+    search_fields = ("agent__name", "agent__slug")
+    readonly_fields = ("id", "agent", "period_month", "budget_usd", "actual_usd",
+                       "overage_usd", "created_at")
+    ordering      = ("-created_at",)

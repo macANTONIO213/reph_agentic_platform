@@ -39,4 +39,10 @@ urlpatterns = [
     path("knowledge/ingest/",                          views.knowledge_ingest,        name="api_knowledge_ingest"),
     # C3: Data connectors
     path("connectors/",                                views.connectors_list,         name="api_connectors_list"),
+    # D1: Prometheus metrics
+    path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
+    # D2: OTel spans
+    path("spans/",                                     views.otel_spans,              name="api_otel_spans"),
+    # D3: Budget alerts
+    path("budget-alerts/",                             views.budget_alerts,           name="api_budget_alerts"),
 ]

@@ -23,6 +23,7 @@ from django.utils import timezone
 from controlplane.models import Agent, AgentRun, ConversationSession, TelemetryEvent
 from controlplane.services.pricing import price_run
 from controlplane.services.guardrails import guardrails, GuardrailBlock
+from controlplane.services.telemetry import telemetry_service
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,9 @@ class PlatformAgentRuntime:
             input_text=message,
         )
         self._telemetry("agent_invoked", run, {"input_length": len(message)})
+        _trace_id = telemetry_service._trace_id_from_run(run.id)
+        # Open root OTel span (non-blocking — errors silently suppressed inside)
+        telemetry_service._open_root_span(run, self.agent)
 
         try:
             yield RuntimeEvent("status", {"run_id": str(run.id), "message": "Run started"}).to_sse()
@@ -155,6 +159,9 @@ class PlatformAgentRuntime:
                     "adapter": adapter_cls.__name__,
                 },
             )
+            # D1: Close OTel root span + budget check
+            telemetry_service._close_root_span(run)
+            telemetry_service.check_budget(self.agent)
             yield RuntimeEvent(
                 "done",
                 {
@@ -178,6 +185,8 @@ class PlatformAgentRuntime:
             run.output_text = str(exc)
             run.save(update_fields=["status", "completed_at", "latency_ms", "output_text"])
             self._telemetry("task_failed", run, {"error": str(exc), "error_id": error_id, "latency_ms": run.latency_ms})
+            # D1: Close OTel root span with error
+            telemetry_service._close_root_span(run, error=str(exc))
             yield RuntimeEvent("error", {"message": f"Run failed. Reference: {error_id}"}).to_sse()
 
     def _telemetry(self, event_type: str, run: AgentRun, payload: dict):
