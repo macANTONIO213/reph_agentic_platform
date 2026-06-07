@@ -65,8 +65,8 @@ a {
 }
 
 .app-page {
-  width: min(1220px, calc(100vw - 48px));
-  margin: 28px auto;
+  width: min(1280px, calc(100vw - 32px));
+  margin: 24px auto;
 }
 
 .metric-card,
@@ -107,13 +107,15 @@ a {
 .platform-topbar,
 .catalog-topbar {
   display: flex;
-  min-height: 56px;
+  min-height: 64px;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 14px 24px;
-  background: var(--dark);
-  color: #ffffff;
+  padding: 12px 24px;
+  background: #ffffff;
+  color: var(--relx-gray-mid);
+  border-bottom: 2px solid var(--relx-orange);
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
 }
 
 .platform-topbar strong,
@@ -121,6 +123,7 @@ a {
   margin: 0;
   font-size: 1.04rem;
   white-space: nowrap;
+  color: var(--relx-gray-mid);
 }
 
 .topbar-actions {
@@ -135,16 +138,27 @@ a {
 
 .search-field input {
   width: min(320px, 32vw);
-  height: 31px;
+  height: 34px;
   padding: 0 14px;
-  border: 1px solid #4b4b4b;
-  background: #393939;
-  color: #ffffff;
+  border: 1px solid #d8d8d8;
+  border-radius: 4px;
+  background: #f7f7f7;
+  color: var(--relx-gray-mid);
   outline: none;
 }
 
+.search-field input:focus {
+  border-color: var(--relx-orange);
+  background: #fff;
+}
+
 .search-field input::placeholder {
-  color: #c0c0c0;
+  color: #aaa;
+}
+
+.topbar-user {
+  color: var(--relx-gray);
+  font-size: 0.82rem;
 }
 
 .admin-button,
@@ -152,12 +166,24 @@ a {
 .button,
 .use-button {
   display: inline-flex;
-  min-height: 31px;
+  min-height: 36px;
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
+  border: 1px solid #cccccc;
+  background: #ffffff;
+  color: #1a1a1a;
   text-decoration: none;
-  font-weight: 800;
+  font-weight: 700;
+  font-size: 0.83rem;
+  border-radius: 4px;
+  padding: 0 16px;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.admin-button:hover,
+.button:hover {
+  background: #f5f5f5;
+  border-color: #aaa;
 }
 
 .admin-button,
@@ -165,47 +191,66 @@ a {
 .button.primary {
   background: var(--orange);
   color: #ffffff;
+  border-color: var(--orange);
+}
+
+.admin-button:hover,
+.published-button:hover,
+.button.primary:hover {
+  background: var(--orange-dark);
+  border-color: var(--orange-dark);
 }
 
 .admin-button,
 .published-button {
-  min-width: 78px;
-  padding: 0 14px;
-  font-size: 0.75rem;
+  min-width: 84px;
+  padding: 0 16px;
+  font-size: 0.83rem;
 }
 
 .platform-body {
   display: grid;
-  grid-template-columns: 164px minmax(0, 1fr);
-  min-height: 620px;
+  grid-template-columns: 190px minmax(0, 1fr);
+  min-height: 680px;
 }
 
 .left-rail,
 .filter-rail {
-  background: #f1f3f5;
+  background: #ffffff;
+  border-right: 1px solid var(--line);
 }
 
 .left-rail {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 34px 18px;
+  gap: 2px;
+  padding: 24px 0;
 }
 
 .left-rail button {
   border: 0;
+  border-left: 4px solid transparent;
   background: transparent;
-  padding: 12px 14px;
-  color: #565656;
-  font-size: 0.84rem;
+  padding: 11px 18px;
+  color: var(--relx-gray);
+  font-size: 0.875rem;
+  font-weight: 400;
   text-align: left;
   text-decoration: none;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.left-rail button:hover {
+  background: #fff7f2;
+  color: var(--relx-gray-mid);
+  border-left-color: rgba(244,121,32,.4);
 }
 
 .left-rail button.active {
-  background: var(--dark);
-  color: #ffffff;
-  font-weight: 800;
+  background: #fff4ec;
+  color: #1a1a1a;
+  font-weight: 700;
+  border-left-color: var(--relx-orange);
 }
 
 .workspace {
@@ -243,15 +288,28 @@ a {
 }
 
 .section-heading h2 {
-  font-size: 1.45rem;
-  line-height: 1.15;
+  font-size: 2rem;
+  font-weight: 900;
+  line-height: 1.1;
+  color: #1a1a1a;
 }
 
 .section-heading p,
 .deployment-heading p {
-  margin: 6px 0 0;
+  margin: 5px 0 0;
   color: var(--muted);
-  font-size: 0.88rem;
+  font-size: 0.85rem;
+}
+
+/* Orange all-caps section label (above h2, like "PROCESS INTELLIGENCE GOVERNANCE") */
+.section-eyebrow {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--relx-orange);
+  margin-bottom: 4px;
 }
 
 .status-actions {
@@ -718,9 +776,9 @@ a {
 }
 
 .catalog-search-row {
-  padding-bottom: 18px;
-  border-top: 1px solid rgba(255,255,255,.12);
-  padding-top: 14px;
+  padding-bottom: 16px;
+  border-top: 1px solid #eeeeee;
+  padding-top: 12px;
 }
 
 .search-field--wide {
@@ -733,19 +791,20 @@ a {
   max-width: 100%;
   height: 38px;
   font-size: 14px;
-  background: rgba(255,255,255,.1);
-  border: 1px solid rgba(255,255,255,.2);
-  border-radius: 8px;
-  color: #fff;
+  background: #f7f7f7;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  color: var(--relx-gray-mid);
   padding: 0 14px;
 }
 
-.search-field--wide input::placeholder { color: rgba(255,255,255,.55); }
+.search-field--wide input::placeholder { color: #aaa; }
 
 .search-field--wide input:focus {
   outline: none;
-  background: rgba(255,255,255,.15);
-  border-color: rgba(255,255,255,.45);
+  background: #fff;
+  border-color: var(--relx-orange);
+  box-shadow: 0 0 0 2px rgba(244,121,32,.12);
 }
 
 .published-button {
@@ -1038,7 +1097,7 @@ td {
 .star:hover, .star:focus { color: #f59e0b; outline: none; }
 
 /* Topbar user label */
-.topbar-user { font-size: 0.78rem; color: #94a3b8; margin-right: 6px; }
+.topbar-user { font-size: 0.78rem; color: var(--relx-gray); margin-right: 6px; }
 
 /* Monitoring strip values */
 .monitoring-strip i { font-style: normal; font-weight: 600; }
@@ -1245,7 +1304,7 @@ td {
 .star:hover, .star.active { color: var(--orange); }
 
 /* Username in topbar */
-.topbar-user { font-size: 0.8rem; color: #bbb; }
+.topbar-user { font-size: 0.8rem; color: var(--relx-gray); }
 
 /* Monitoring strip bold values */
 .monitoring-strip i { font-style: normal; font-weight: 800; }
@@ -1628,4 +1687,32 @@ td {
 .relx-logo__svg {
   flex-shrink: 0;
   display: block;
+}
+
+/* RELX logo — no pill needed, topbar is now white */
+.relx-logo {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: none;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.relx-logo__img {
+  height: 32px;
+  width: auto;
+  display: block;
+}
+
+.relx-logo__product {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--relx-gray);
+  white-space: nowrap;
+  border-left: 1px solid #d8d8d8;
+  margin-left: 14px;
+  padding-left: 14px;
 }

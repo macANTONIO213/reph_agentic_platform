@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>REPH Agentic AI Platform</title>
-    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-3">
+    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-4">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -13,17 +13,8 @@
       <section class="platform-app" id="live-agent" aria-label="REPH Agentic AI Platform">
         <header class="platform-topbar">
           <div class="relx-logo" aria-label="RELX — Agentic AI Platform">
-            <svg class="relx-logo__svg" width="38" height="38" viewBox="0 0 38 38" aria-hidden="true">
-              <!-- Outer orange arc -->
-              <path d="M19 2 A17 17 0 1 1 4.5 27" fill="none" stroke="#f47920" stroke-width="4" stroke-linecap="round"/>
-              <!-- Inner stylised R strokes -->
-              <path d="M12 10 L12 28 M12 10 Q22 10 22 17 Q22 24 12 24 M18 24 L24 28" fill="none" stroke="#f47920" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <div class="relx-logo__divider"></div>
-            <div class="relx-logo__wordmark">
-              <span class="relx-logo__relx">RELX</span>
-              <span class="relx-logo__product">Agentic AI Platform</span>
-            </div>
+            <img src="{% static 'controlplane/relx-logo.png' %}" alt="RELX | Reed Elsevier" class="relx-logo__img">
+            <span class="relx-logo__product">Agentic AI Platform</span>
           </div>
           <div class="topbar-actions">
             <label class="search-field">
@@ -49,7 +40,8 @@
             <section class="command-center platform-view active" id="deployments" data-view-panel="deployments" aria-labelledby="command-title">
               <div class="section-heading">
                 <div>
-                  <h2 id="command-title">Deployment command center</h2>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
+                  <h2 id="command-title">Deployment Command Center</h2>
                   <p>Production agents</p>
                 </div>
                 <div class="status-actions" aria-label="Command center status">
@@ -215,6 +207,7 @@
             <section class="platform-view" id="monitoring-view" data-view-panel="monitoring" aria-labelledby="mon-title">
               <div class="section-heading">
                 <div>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
                   <h2 id="mon-title">Monitoring Dashboard</h2>
                   <p>Cross-agent observability — usage, health, cost and quality</p>
                 </div>
@@ -364,7 +357,10 @@
             <section class="catalog-shell platform-view" id="catalog" data-view-panel="catalog" aria-labelledby="catalog-title">
               <header class="catalog-topbar">
                 <div class="catalog-title-row">
-                  <h2 id="catalog-title">Agent Catalog</h2>
+                  <div>
+                    <span class="section-eyebrow">Agentic AI Governance</span>
+                    <h2 id="catalog-title">Agent Catalog</h2>
+                  </div>
                   <div class="catalog-title-actions">
                     <button class="published-button" id="publishedFilter" type="button" aria-pressed="false">Published</button>
                     <button class="button primary" id="openRegisterModal" type="button">+ Register agent</button>

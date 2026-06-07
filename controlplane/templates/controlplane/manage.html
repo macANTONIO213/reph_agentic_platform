@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Platform Management — REPH</title>
-    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-3">
+    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-4">
     <link rel="stylesheet" href="{% static 'controlplane/manage.css' %}?v=1">
   </head>
   <body>
@@ -14,15 +14,8 @@
 
         <header class="platform-topbar">
           <div class="relx-logo" aria-label="RELX — Platform Management">
-            <svg class="relx-logo__svg" width="38" height="38" viewBox="0 0 38 38" aria-hidden="true">
-              <path d="M19 2 A17 17 0 1 1 4.5 27" fill="none" stroke="#f47920" stroke-width="4" stroke-linecap="round"/>
-              <path d="M12 10 L12 28 M12 10 Q22 10 22 17 Q22 24 12 24 M18 24 L24 28" fill="none" stroke="#f47920" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <div class="relx-logo__divider"></div>
-            <div class="relx-logo__wordmark">
-              <span class="relx-logo__relx">RELX</span>
-              <span class="relx-logo__product">Platform Management</span>
-            </div>
+            <img src="{% static 'controlplane/relx-logo.png' %}" alt="RELX | Reed Elsevier" class="relx-logo__img">
+            <span class="relx-logo__product">Platform Management</span>
           </div>
           <div class="topbar-actions">
             <a class="admin-button" href="/">← Dashboard</a>
@@ -52,6 +45,7 @@
             <section class="platform-view active" data-view-panel="overview" aria-labelledby="ov-title">
               <div class="section-heading">
                 <div>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
                   <h2 id="ov-title">Overview</h2>
                   <p>Platform health at a glance</p>
                 </div>
@@ -136,6 +130,7 @@
             <section class="platform-view" data-view-panel="agents" aria-labelledby="ag-title">
               <div class="section-heading">
                 <div>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
                   <h2 id="ag-title">Agents</h2>
                   <p>{{ agents|length }} registered agents</p>
                 </div>
@@ -195,6 +190,7 @@
             <section class="platform-view" data-view-panel="governance" aria-labelledby="gov-title">
               <div class="section-heading">
                 <div>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
                   <h2 id="gov-title">Governance Reviews</h2>
                   <p>Approve or reject agent reviews to gate production promotion</p>
                 </div>
@@ -261,6 +257,7 @@
             <section class="platform-view" data-view-panel="approvals" aria-labelledby="ap-title">
               <div class="section-heading">
                 <div>
+                  <span class="section-eyebrow">Agentic AI Governance</span>
                   <h2 id="ap-title">Tier 4 Approvals</h2>
                   <p>Grant a time-limited server-side approval for a Tier 4 agent run</p>
                 </div>
