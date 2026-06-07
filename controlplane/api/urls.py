@@ -27,4 +27,8 @@ urlpatterns = [
     path("org/divisions/",                             views.org_divisions,           name="api_org_divisions"),
     path("org/work-streams/",                          views.org_work_streams,        name="api_org_work_streams"),
     path("org/processes/",                             views.org_processes,           name="api_org_processes"),
+    # B3: Eval suite endpoints
+    path("agents/<uuid:agent_id>/evals/",              views.eval_suites,             name="api_eval_suites"),
+    path("evals/<uuid:suite_id>/run/",                 views.eval_run_suite,          name="api_eval_run_suite"),
+    path("evals/runs/<uuid:run_id>/",                  views.eval_run_detail,         name="api_eval_run_detail"),
 ]

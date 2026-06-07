@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from controlplane.models import Agent, AgentVersion, Approval, AuditLog, BusinessUnit, GovernanceReview
+from controlplane.models import Agent, AgentVersion, Approval, AuditLog, BusinessUnit, EvalSuite, GovernanceReview
 
 
 class RegistrationError(ValueError):
@@ -302,7 +302,17 @@ class GovernanceService:
 
     @staticmethod
     def _check_production_gates(agent: Agent) -> None:
-        """Raise TransitionError if any production gate is unmet."""
+        """
+        Raise TransitionError if any production gate is unmet.
+
+        Gates (all three must pass):
+          1. An approved GovernanceReview
+          2. A valid (unexpired, unconsumed) Approval
+          3. A passing EvalRun on the agent's active EvalSuite
+             (skipped if no suite exists — allows agents without evals to promote,
+              but once a suite is created it becomes mandatory)
+        """
+        # Gate 1 — Governance review
         has_review = agent.governance_reviews.filter(
             status=GovernanceReview.Status.APPROVED
         ).exists()
@@ -312,6 +322,7 @@ class GovernanceService:
                 "an approved GovernanceReview is required."
             )
 
+        # Gate 2 — Approval token
         has_approval = agent.approvals.filter(
             is_consumed=False,
             expires_at__gt=timezone.now(),
@@ -321,6 +332,17 @@ class GovernanceService:
                 f"Cannot promote '{agent.name}' to production: "
                 "a valid (unexpired, unconsumed) Approval by an authorised approver is required."
             )
+
+        # Gate 3 — Eval suite (mandatory once a suite exists)
+        active_suite = EvalSuite.objects.filter(agent=agent, is_active=True).first()
+        if active_suite is not None:
+            has_passing_run = active_suite.runs.filter(passed=True).exists()
+            if not has_passing_run:
+                raise TransitionError(
+                    f"Cannot promote '{agent.name}' to production: "
+                    f"EvalSuite '{active_suite.name}' has no passing run. "
+                    f"Run evals and achieve ≥{active_suite.pass_threshold}% pass rate first."
+                )
 
     @staticmethod
     def _require_role(actor, roles: set) -> None:

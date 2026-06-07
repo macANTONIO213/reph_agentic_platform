@@ -13,7 +13,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from controlplane.models import (
     Agent, AgentFeedback, AgentRun, Approval, AuditLog,
-    BusinessUnit, Division, OrgProcess, WorkStream,
+    BusinessUnit, Division, EvalCase, EvalRun, EvalSuite, OrgProcess, WorkStream,
 )
 from controlplane.services.governance import governance, RegistrationError, TransitionError
 from .aggregations import (
@@ -459,3 +459,85 @@ def org_processes(request):
     if ws_id:
         qs = qs.filter(work_stream_id=ws_id)
     return JsonResponse({"items": [{"id": str(p.id), "name": p.name} for p in qs]})
+
+
+# ── B3: Eval endpoints ────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def eval_suites(request, agent_id):
+    """GET /api/v1/agents/<id>/evals/ — list suites + latest run for an agent."""
+    from django.shortcuts import get_object_or_404
+    agent = get_object_or_404(Agent, id=agent_id)
+    suites = EvalSuite.objects.filter(agent=agent).prefetch_related("runs").order_by("-created_at")
+    data = []
+    for s in suites:
+        latest = s.runs.order_by("-executed_at").first()
+        data.append({
+            "id": str(s.id),
+            "name": s.name,
+            "pass_threshold": float(s.pass_threshold),
+            "is_active": s.is_active,
+            "case_count": s.cases.count(),
+            "latest_run": {
+                "id": str(latest.id),
+                "passed": latest.passed,
+                "pass_rate": float(latest.pass_rate),
+                "total_cases": latest.total_cases,
+                "passed_cases": latest.passed_cases,
+                "executed_at": latest.executed_at.isoformat(),
+                "status": latest.status,
+            } if latest else None,
+        })
+    return JsonResponse({"suites": data})
+
+
+@login_required
+@require_POST
+def eval_run_suite(request, suite_id):
+    """POST /api/v1/evals/<suite_id>/run/ — trigger an eval run."""
+    from django.shortcuts import get_object_or_404
+    from controlplane.services.eval_service import eval_service
+    if not (request.user.is_staff or request.user.groups.filter(
+            name__in=["platform_admin", "agent_approver"]).exists()):
+        # Also allow via UserProfile role
+        from controlplane.models import UserProfile as _UP
+        role = _UP.objects.filter(user=request.user).values_list("role", flat=True).first()
+        if role not in ("platform_admin", "agent_approver"):
+            return JsonResponse({"error": "Approver or admin role required to run evals."}, status=403)
+
+    suite = get_object_or_404(EvalSuite, id=suite_id)
+    run = eval_service.run_suite(suite=suite, triggered_by=request.user.username)
+    return JsonResponse({
+        "run_id": str(run.id),
+        "suite": suite.name,
+        "agent": suite.agent.name,
+        "passed": run.passed,
+        "pass_rate": float(run.pass_rate),
+        "total_cases": run.total_cases,
+        "passed_cases": run.passed_cases,
+        "status": run.status,
+        "case_results": run.case_results,
+    }, status=201)
+
+
+@login_required
+@require_GET
+def eval_run_detail(request, run_id):
+    """GET /api/v1/evals/runs/<run_id>/ — fetch a single run result."""
+    from django.shortcuts import get_object_or_404
+    run = get_object_or_404(EvalRun, id=run_id)
+    return JsonResponse({
+        "id": str(run.id),
+        "suite": run.suite.name,
+        "agent": run.suite.agent.name,
+        "passed": run.passed,
+        "pass_rate": float(run.pass_rate),
+        "total_cases": run.total_cases,
+        "passed_cases": run.passed_cases,
+        "status": run.status,
+        "case_results": run.case_results,
+        "error_detail": run.error_detail,
+        "executed_at": run.executed_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    })

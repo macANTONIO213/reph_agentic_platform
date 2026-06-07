@@ -168,6 +168,10 @@ class Agent(models.Model):
         default="block",
         help_text="Content guardrail enforcement level for this agent.",
     )
+    quality_alert = models.BooleanField(
+        default=False,
+        help_text="Set by compute_baselines management command when satisfaction drops >20% below 7-day baseline.",
+    )
     monthly_active_users = models.PositiveIntegerField(default=0)
     monthly_runs = models.PositiveIntegerField(default=0)
     monthly_cost_usd = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -494,6 +498,137 @@ from django.dispatch import receiver
 def _create_user_profile(sender, instance, created, **kwargs):
     if created:
         UserProfile.objects.get_or_create(user=instance)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B3 — Eval Suite / Eval Run  (production gate)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class EvalSuite(models.Model):
+    """
+    A named collection of test cases for an agent.
+    An agent must have at least one passing EvalRun against its active suite
+    before it can be promoted to production.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(
+        Agent, on_delete=models.CASCADE, related_name="eval_suites"
+    )
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    pass_threshold = models.DecimalField(
+        max_digits=4, decimal_places=1, default=80.0,
+        help_text="Minimum pass rate (%) required for the suite to be considered passing.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Only one active suite per agent is checked at gate time.",
+    )
+    created_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.agent.name} / {self.name}"
+
+    @property
+    def latest_passing_run(self):
+        return self.runs.filter(passed=True).order_by("-executed_at").first()
+
+
+class EvalCase(models.Model):
+    """A single test case (input + expected output criteria) within a suite."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    suite = models.ForeignKey(
+        EvalSuite, on_delete=models.CASCADE, related_name="cases"
+    )
+    name = models.CharField(max_length=200)
+    input_message = models.TextField(help_text="User message to send to the agent.")
+    expected_keywords = models.JSONField(
+        default=list, blank=True,
+        help_text="List of strings that must appear in the response (case-insensitive).",
+    )
+    must_not_contain = models.JSONField(
+        default=list, blank=True,
+        help_text="List of strings that must NOT appear in the response.",
+    )
+    max_latency_ms = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Optional maximum acceptable latency in milliseconds.",
+    )
+    weight = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Relative weight of this case in the overall pass rate.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.suite.name} / {self.name}"
+
+
+class EvalRun(models.Model):
+    """
+    A scored execution of an EvalSuite.
+    Records pass/fail per case and an overall pass rate.
+    """
+    class Status(models.TextChoices):
+        PENDING  = "pending",  "Pending"
+        RUNNING  = "running",  "Running"
+        COMPLETE = "complete", "Complete"
+        ERROR    = "error",    "Error"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    suite = models.ForeignKey(
+        EvalSuite, on_delete=models.CASCADE, related_name="runs"
+    )
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.PENDING
+    )
+    triggered_by = models.CharField(max_length=120, blank=True)
+    # Aggregate results
+    total_cases = models.PositiveIntegerField(default=0)
+    passed_cases = models.PositiveIntegerField(default=0)
+    pass_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        help_text="Pass rate as a percentage (0–100).",
+    )
+    passed = models.BooleanField(
+        default=False,
+        help_text="True when pass_rate >= suite.pass_threshold.",
+    )
+    # Per-case results stored as JSON: [{case_id, name, passed, reason, latency_ms}]
+    case_results = models.JSONField(default=list, blank=True)
+    error_detail = models.TextField(blank=True)
+    executed_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-executed_at"]
+
+    def __str__(self):
+        return f"EvalRun {self.id} — {self.suite.name} {'✓' if self.passed else '✗'}"
+
+    def compute_pass_rate(self) -> None:
+        """Recalculate pass_rate and passed from case_results; save."""
+        if not self.case_results:
+            self.pass_rate = 0
+            self.passed = False
+        else:
+            total_weight = sum(r.get("weight", 1) for r in self.case_results)
+            passed_weight = sum(
+                r.get("weight", 1) for r in self.case_results if r.get("passed")
+            )
+            self.pass_rate = round(
+                (passed_weight / total_weight * 100) if total_weight else 0, 2
+            )
+            self.passed = self.pass_rate >= float(self.suite.pass_threshold)
+        self.save(update_fields=["pass_rate", "passed"])
 
 
 class AuditLog(models.Model):

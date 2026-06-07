@@ -5,8 +5,8 @@ from django.utils.html import format_html
 from .models import (
     Agent, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
     Approval, AuditLog,
-    BusinessUnit, ConversationSession, Division, GovernanceReview,
-    OrgProcess, TelemetryEvent, UserProfile, WorkStream,
+    BusinessUnit, ConversationSession, Division, EvalCase, EvalRun, EvalSuite,
+    GovernanceReview, OrgProcess, TelemetryEvent, UserProfile, WorkStream,
 )
 from .services.governance import governance, TransitionError
 
@@ -347,6 +347,74 @@ class AuditLogAdmin(admin.ModelAdmin):
     list_filter = ("action", "resource_type")
     search_fields = ("actor", "action", "resource_id")
     readonly_fields = ("created_at", "actor", "action", "resource_type", "resource_id", "payload", "ip_address")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+# ── B3: Eval Suites ───────────────────────────────────────────────────────────
+
+class EvalCaseInline(admin.TabularInline):
+    model = EvalCase
+    extra = 1
+    fields = ("name", "input_message", "expected_keywords", "must_not_contain",
+              "max_latency_ms", "weight")
+
+
+class EvalRunInline(admin.TabularInline):
+    model = EvalRun
+    extra = 0
+    readonly_fields = ("status", "pass_rate", "passed", "passed_cases",
+                       "total_cases", "triggered_by", "executed_at")
+    fields = readonly_fields
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(EvalSuite)
+class EvalSuiteAdmin(admin.ModelAdmin):
+    list_display  = ("name", "agent", "pass_threshold", "is_active",
+                     "latest_run_status", "created_at")
+    list_filter   = ("is_active", "agent")
+    search_fields = ("name", "agent__name")
+    inlines       = [EvalCaseInline, EvalRunInline]
+    actions       = ["run_suite_action"]
+
+    @admin.display(description="Latest run")
+    def latest_run_status(self, obj):
+        run = obj.runs.order_by("-executed_at").first()
+        if not run:
+            return "—"
+        icon = "✓" if run.passed else "✗"
+        return f"{icon} {run.pass_rate}% ({run.executed_at:%Y-%m-%d})"
+
+    @admin.action(description="▶ Run eval suite now")
+    def run_suite_action(self, request, queryset):
+        from controlplane.services.eval_service import eval_service
+        for suite in queryset:
+            run = eval_service.run_suite(suite=suite, triggered_by=request.user.username)
+            level = messages.SUCCESS if run.passed else messages.WARNING
+            self.message_user(
+                request,
+                f"Suite '{suite.name}': {run.pass_rate}% "
+                f"({'PASSED' if run.passed else 'FAILED'}) — {run.passed_cases}/{run.total_cases} cases",
+                level=level,
+            )
+
+
+@admin.register(EvalRun)
+class EvalRunAdmin(admin.ModelAdmin):
+    list_display  = ("suite", "status", "pass_rate", "passed", "passed_cases",
+                     "total_cases", "triggered_by", "executed_at")
+    list_filter   = ("passed", "status", "suite__agent")
+    readonly_fields = ("suite", "status", "pass_rate", "passed", "passed_cases",
+                       "total_cases", "case_results", "error_detail",
+                       "triggered_by", "executed_at", "completed_at")
 
     def has_add_permission(self, request):
         return False

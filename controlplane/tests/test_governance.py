@@ -51,7 +51,9 @@ def _minimal_data(**overrides):
 
 class RegisterAgentTests(TestCase):
     def setUp(self):
-        self.actor = _make_user("builder")
+        # Staff flag bypasses role gate — these tests exercise registration logic,
+        # not the role gate (which is covered in test_phase_b.py).
+        self.actor = _make_user("builder", is_staff=True)
 
     def test_creates_agent_in_draft(self):
         agent = governance.register_agent(actor=self.actor, data=_minimal_data())
@@ -212,15 +214,17 @@ class TransitionTests(TestCase):
 
 class RecordApprovalTests(TestCase):
     def setUp(self):
-        self.actor = _make_user("builder")
+        self.actor = _make_user("builder", is_staff=True)
         self.approver = _add_group(_make_user("approver"), "agent_approver")
         self.agent = governance.register_agent(
             actor=self.actor, data=_minimal_data()
         )
 
     def test_non_approver_raises_permission_error(self):
+        # Use a plain non-staff user without any approver role/group
+        plain_user = _make_user("plain_non_approver", is_staff=False)
         with self.assertRaises(PermissionError):
-            governance.record_approval(actor=self.actor, agent=self.agent)
+            governance.record_approval(actor=plain_user, agent=self.agent)
 
     def test_approver_can_record_approval(self):
         approval = governance.record_approval(actor=self.approver, agent=self.agent)
