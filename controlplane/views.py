@@ -106,6 +106,14 @@ def _is_rate_limited(ip: str, agent_id: str) -> bool:
 def run_agent(request, agent_id):
     agent = get_object_or_404(Agent, id=agent_id, status__in=[Agent.Status.PILOT, Agent.Status.PRODUCTION])
 
+    # Tenant scoping — a user may only run agents within their own business unit
+    # (staff / platform_admins are cross-tenant and bypass this check).
+    profile = getattr(request.user, "profile", None)
+    if profile is not None and not profile.can_access_agent(agent):
+        return JsonResponse(
+            {"error": "You do not have access to this agent."}, status=403
+        )
+
     ip = request.META.get("REMOTE_ADDR", "unknown")
     if _is_rate_limited(ip, str(agent_id)):
         return JsonResponse({"error": "Rate limit exceeded. Try again in a minute."}, status=429)

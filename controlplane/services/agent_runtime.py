@@ -22,7 +22,7 @@ from django.utils import timezone
 
 from controlplane.models import Agent, AgentRun, ConversationSession, TelemetryEvent
 from controlplane.services.pricing import price_run
-from controlplane.services.guardrails import guardrails, GuardrailBlock
+from controlplane.services.guardrails import guardrails, GuardrailBlock, Severity
 from controlplane.services.telemetry import telemetry_service
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class PlatformAgentRuntime:
             input_text=message,
         )
         self._telemetry("agent_invoked", run, {"input_length": len(message)})
-        _trace_id = telemetry_service._trace_id_from_run(run.id)
+        _trace_id = telemetry_service._trace_id_from_run(run)
         # Open root OTel span (non-blocking — errors silently suppressed inside)
         telemetry_service._open_root_span(run, self.agent)
 
@@ -123,6 +123,37 @@ class PlatformAgentRuntime:
             adapter_cls = _select_adapter_class(self.agent)
             adapter = adapter_cls(agent=self.agent, user_label=self.user_label)
             yield from adapter.execute(run, message, history, meta)
+
+            # ── Output guardrail scan ─────────────────────────────────────────
+            # Detect PII / credential / system-prompt leakage in the model output.
+            # Streaming means tokens are already emitted, so on 'block' we withhold
+            # the *stored* response and emit a post-hoc warning event.
+            try:
+                out_findings = guardrails.scan_output(
+                    text=meta.get("output_text", ""),
+                    agent=self.agent,
+                    actor=self.user_label,
+                    run_id=str(run.id),
+                    ip=None,
+                )
+            except Exception:
+                out_findings = []
+            if out_findings:
+                level = getattr(self.agent, "guardrail_level", "block")
+                high = [f for f in out_findings if f.severity == Severity.HIGH]
+                yield RuntimeEvent("guardrail", {
+                    "run_id": str(run.id),
+                    "direction": "output",
+                    "findings": [
+                        {"rule": f.rule_id, "severity": f.severity, "detail": f.detail}
+                        for f in out_findings
+                    ],
+                }).to_sse()
+                if high and level == "block":
+                    meta["output_text"] = (
+                        "[Response withheld: output flagged by content guardrails.]"
+                    )
+            # ──────────────────────────────────────────────────────────────────
 
             run.status = AgentRun.Status.COMPLETED
             run.output_text = meta["output_text"]

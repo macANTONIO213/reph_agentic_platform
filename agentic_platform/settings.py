@@ -27,11 +27,20 @@ HTTP_API_BEARER_TOKEN = os.environ.get("HTTP_API_BEARER_TOKEN", "")
 DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
 
 if SECRET_KEY == "dev-agentic-platform-change-me":
-    warnings.warn(
-        "DJANGO_SECRET_KEY is using the insecure default. "
-        "Set the DJANGO_SECRET_KEY environment variable before any non-local deployment.",
-        stacklevel=1,
-    )
+    if DEBUG:
+        warnings.warn(
+            "DJANGO_SECRET_KEY is using the insecure default. "
+            "Set the DJANGO_SECRET_KEY environment variable before any non-local deployment.",
+            stacklevel=1,
+        )
+    else:
+        # Refuse to start a production (DEBUG=False) process with the default key.
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY is unset/insecure while DEBUG=False. "
+            "Set a strong DJANGO_SECRET_KEY environment variable before deploying."
+        )
 
 _allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "")
 ALLOWED_HOSTS = (
@@ -126,3 +135,19 @@ _render_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
 if _render_hostname:
     ALLOWED_HOSTS.append(_render_hostname)
     CSRF_TRUSTED_ORIGINS.append(f"https://{_render_hostname}")
+
+# ── Production security hardening ────────────────────────────────────────────
+# Applied only when DEBUG is off, so local development is unaffected.
+if not DEBUG:
+    # Honour the X-Forwarded-Proto header set by the Render/upstream TLS proxy.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "True").lower() in ("true", "1", "yes")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    # HSTS — 1 year, includes subdomains; opt out via env if needed.
+    SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    X_FRAME_OPTIONS = "DENY"

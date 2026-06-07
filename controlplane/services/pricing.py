@@ -2,8 +2,14 @@
 Pricing table for LLM models. Prices are USD per 1M tokens.
 Normalize Bedrock/Azure model IDs to canonical keys before lookup.
 """
+import logging
 import re
 from decimal import Decimal
+
+logger = logging.getLogger(__name__)
+
+# Model ids that are intentionally free / non-billable (suppress the unknown-model warning).
+_FREE_MODELS = {"fake", "echo", "unconfigured", ""}
 
 # (input_per_1m_usd, output_per_1m_usd)
 PRICING: dict[str, tuple[Decimal, Decimal]] = {
@@ -60,9 +66,19 @@ def normalize_model_id(model_id: str) -> str:
 
 
 def price_run(input_tokens: int, output_tokens: int, model_id: str) -> Decimal:
-    """Return cost in USD for a single run. Returns Decimal('0') for unknown models."""
+    """
+    Return cost in USD for a single run. Returns Decimal('0') for unknown models,
+    logging a warning so a typo'd/unmapped model_id does not silently break cost
+    and budget tracking (the run would otherwise be recorded at $0).
+    """
     canonical = normalize_model_id(model_id)
     if canonical not in PRICING:
+        if canonical not in _FREE_MODELS:
+            logger.warning(
+                "price_run: unknown model_id %r (normalized %r) — pricing at $0; "
+                "add it to PRICING or it will not count toward budgets.",
+                model_id, canonical,
+            )
         return Decimal("0")
     input_price, output_price = PRICING[canonical]
     return (Decimal(input_tokens) * input_price + Decimal(output_tokens) * output_price) / Decimal("1_000_000")

@@ -90,6 +90,18 @@ def agents_list(request):
         q = request.GET["search"]
         agents = agents.filter(Q(name__icontains=q) | Q(owner__icontains=q) | Q(business_unit__icontains=q))
 
+    # Tenant scoping — non-cross-tenant users only see agents in their own BU.
+    profile = getattr(request.user, "profile", None)
+    if profile is not None and not profile.is_cross_tenant:
+        bu_id = profile.business_unit_id
+        if bu_id is None:
+            agents = agents.none()
+        else:
+            bu_name = profile.business_unit.name if profile.business_unit else ""
+            agents = agents.filter(
+                Q(org_unit_id=bu_id) | (Q(org_unit__isnull=True) & Q(business_unit=bu_name))
+            )
+
     telemetry = agent_catalog_telemetry(window)
 
     data = []
@@ -292,19 +304,22 @@ def agent_transition(request, agent_id):
         return JsonResponse({"error": "'status' is required."}, status=400)
 
     try:
-        # Staff can bypass the governance gate for admin overrides
-        agent.transition_to(new_status, bypass_governance=request.user.is_staff)
+        # Route through GovernanceService so ALL production gates are enforced
+        # (approved review + valid Approval token + passing eval). Only staff may
+        # break-glass past the gates; platform_admins are still gated.
+        governance.transition(
+            actor=request.user,
+            agent=agent,
+            to_status=new_status,
+            source="api",
+            ip=request.META.get("REMOTE_ADDR"),
+            bypass=request.user.is_staff,
+        )
     except ValueError as e:
+        # TransitionError subclasses ValueError; covers both gate + state-machine failures.
         return JsonResponse({"error": str(e)}, status=400)
 
-    AuditLog.objects.create(
-        actor=request.user.username,
-        action="agent_status_change",
-        resource_type="Agent",
-        resource_id=str(agent.id),
-        payload={"new_status": new_status, "agent": agent.name},
-        ip_address=request.META.get("REMOTE_ADDR"),
-    )
+    # governance.transition() writes its own audit record (agent.transition[.forced]).
     return JsonResponse({"status": agent.status, "agent_id": str(agent.id)})
 
 
@@ -391,7 +406,8 @@ def agent_register(request):
     """
     POST /api/v1/agents/register/
     Creates a new Agent in status=draft via GovernanceService.
-    Any authenticated user may register (builder role not yet enforced — noted in DECISIONS.md).
+    Requires agent_builder, agent_approver, or platform_admin role (enforced by
+    GovernanceService.register_agent); unauthorized callers receive HTTP 403.
     """
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
@@ -413,6 +429,8 @@ def agent_register(request):
         )
     except RegistrationError as e:
         return JsonResponse({"error": str(e)}, status=400)
+    except PermissionError as e:
+        return JsonResponse({"error": str(e)}, status=403)
     except Exception as e:
         return JsonResponse({"error": f"Unexpected error: {e}"}, status=500)
 
@@ -973,9 +991,25 @@ def shared_memory(request, run_id):
     from controlplane.services.memory import memory_service
 
     try:
-        run = WorkflowRun.objects.get(id=run_id)
+        run = WorkflowRun.objects.select_related("workflow").get(id=run_id)
     except WorkflowRun.DoesNotExist:
         return JsonResponse({"error": "Workflow run not found."}, status=404)
+
+    # Access control — only the run's triggerer, same-BU members, or cross-tenant
+    # staff/admins may read or write a workflow run's shared memory.
+    profile = getattr(request.user, "profile", None)
+    is_cross = profile.is_cross_tenant if profile is not None else request.user.is_staff
+    wf_bu_id = run.workflow.business_unit_id
+    allowed = (
+        is_cross
+        or run.triggered_by == request.user.username
+        or (profile is not None and wf_bu_id is not None
+            and profile.business_unit_id == wf_bu_id)
+    )
+    if not allowed:
+        return JsonResponse(
+            {"error": "You do not have access to this workflow run."}, status=403
+        )
 
     if request.method == "GET":
         entries = SharedMemory.objects.filter(workflow_run=run).order_by("-updated_at")

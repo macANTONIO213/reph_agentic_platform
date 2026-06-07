@@ -292,12 +292,28 @@ class Command(BaseCommand):
 
         # Create a demo superuser if none exists.
         if not User.objects.filter(username="admin").exists():
-            User.objects.create_superuser(
-                username="admin",
-                email="admin@reph.internal",
-                password="admin",
-            )
-            self.stdout.write(self.style.WARNING("Created superuser: admin / admin — change password before any real deployment."))
+            import os
+            from django.conf import settings as _settings
+
+            admin_password = os.environ.get("DJANGO_SUPERUSER_PASSWORD", "")
+            if not admin_password:
+                if not _settings.DEBUG:
+                    # Never seed an insecure default superuser in production.
+                    self.stdout.write(self.style.WARNING(
+                        "Skipped demo superuser: set DJANGO_SUPERUSER_PASSWORD to seed an "
+                        "admin when DEBUG=False (refusing to create 'admin/admin')."
+                    ))
+                    admin_password = None
+                else:
+                    admin_password = "admin"
+            if admin_password:
+                User.objects.create_superuser(
+                    username="admin",
+                    email="admin@reph.internal",
+                    password=admin_password,
+                )
+                hint = "from DJANGO_SUPERUSER_PASSWORD" if admin_password != "admin" else "admin / admin — change password before any real deployment"
+                self.stdout.write(self.style.WARNING(f"Created superuser: admin ({hint})."))
         else:
             self.stdout.write("Superuser 'admin' already exists — skipped.")
 

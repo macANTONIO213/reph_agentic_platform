@@ -10,10 +10,10 @@ Selects the optimal LLM model for a given agent task based on:
 
 Decision matrix (in priority order):
   explicit override           → honour it
-  risk_tier == 4              → claude-opus-4-8       (max capability)
+  risk_tier == 4              → claude-opus-4-8       (capability floor — budget/latency cannot downgrade)
+  budget_alert == True        → claude-haiku-4-5      (cheapest; Tiers 1–3 only)
+  timeout_seconds <= 30       → claude-haiku-4-5      (fastest; Tiers 1–3 only)
   risk_tier == 3              → claude-sonnet-4-6     (balanced)
-  budget_alert == True        → claude-haiku-4-5      (cheapest)
-  timeout_seconds <= 30       → claude-haiku-4-5      (fastest)
   risk_tier <= 2              → claude-sonnet-4-6     (default)
   fallback                    → claude-sonnet-4-6
 
@@ -94,19 +94,27 @@ class ModelRouter:
         budget_alert = getattr(agent, "budget_alert", False)
         timeout = getattr(task, "timeout_seconds", 120) if task else 120
 
-        # 3. Budget pressure
+        # 3. Capability floor — Tier-4 (highest-risk: regulated/customer data,
+        #    production systems) must always use the most capable model. Budget
+        #    and latency pressure must NEVER silently downgrade a Tier-4 agent.
+        if risk_tier >= 4:
+            chosen = _OPENAI_BY_TIER[4] if is_openai else _ANTHROPIC_BY_TIER[4]
+            logger.debug("Router: Tier-4 capability floor → %s", chosen)
+            return chosen
+
+        # 4. Budget pressure (Tiers 1–3 only)
         if budget_alert:
             chosen = _OPENAI_BUDGET if is_openai else _ANTHROPIC_BUDGET
             logger.debug("Router: budget pressure → %s", chosen)
             return chosen
 
-        # 4. Fast-path for tight timeouts
+        # 5. Fast-path for tight timeouts
         if timeout <= _FAST_TIMEOUT:
             chosen = _OPENAI_FAST if is_openai else _ANTHROPIC_FAST
             logger.debug("Router: fast timeout (%ss) → %s", timeout, chosen)
             return chosen
 
-        # 5. Risk tier routing
+        # 6. Risk tier routing
         tier = max(1, min(4, risk_tier))
         if is_openai:
             chosen = _OPENAI_BY_TIER.get(tier, _OPENAI_DEFAULT)

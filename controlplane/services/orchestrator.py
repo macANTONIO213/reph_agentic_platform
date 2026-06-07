@@ -25,6 +25,7 @@ Usage::
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import re
 import time
@@ -36,6 +37,30 @@ logger = logging.getLogger(__name__)
 
 # Simple {{token}} substitution regex
 _TOKEN_RE = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
+
+
+def _parse_sse(block: str) -> tuple[str | None, dict]:
+    """
+    Parse a single SSE block produced by RuntimeEvent.to_sse(), which has the
+    shape ``"event: <name>\\ndata: <json>\\n\\n"``.
+
+    Returns (event_name, data_dict). Returns (None, {}) if the block has no
+    recognisable event line or its data payload is not valid JSON.
+    """
+    event: str | None = None
+    data_str: str | None = None
+    for line in block.splitlines():
+        if line.startswith("event:"):
+            event = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_str = line[len("data:"):].strip()
+    if event is None or data_str is None:
+        return None, {}
+    try:
+        payload = _json.loads(data_str)
+    except (ValueError, TypeError):
+        return None, {}
+    return event, (payload if isinstance(payload, dict) else {})
 
 
 def _resolve_template(template: str, context: dict) -> str:
@@ -271,10 +296,10 @@ class OrchestratorService:
         Invoke an agent synchronously.  Collects SSE events from the streaming
         runtime and returns the final output text + AgentRun instance.
         """
-        from controlplane.services.agent_runtime import AgentRuntime
+        from controlplane.services.agent_runtime import PlatformAgentRuntime
         from controlplane.models import AgentRun
 
-        runtime = AgentRuntime(
+        runtime = PlatformAgentRuntime(
             agent=agent,
             user_label=f"workflow:{workflow_run.id}",
             channel="workflow",
@@ -282,29 +307,19 @@ class OrchestratorService:
 
         output_parts: list[str] = []
         run_id: str | None = None
-        import json as _json
 
-        for sse_line in runtime.stream(message):
-            # SSE lines look like: "data: {...}\n\n"
-            if not sse_line.startswith("data:"):
+        for block in runtime.stream(message):
+            event, payload = _parse_sse(block)
+            if event is None:
                 continue
-            try:
-                payload = _json.loads(sse_line[5:].strip())
-                event_type = payload.get("type", "")
-                if event_type == "status":
-                    run_id = payload.get("run_id")
-                elif event_type == "token":
-                    output_parts.append(payload.get("text", ""))
-                elif event_type == "done":
-                    run_id = payload.get("run_id") or run_id
-                elif event_type == "error":
-                    raise OrchestratorError(
-                        payload.get("message", "Agent run failed.")
-                    )
-            except OrchestratorError:
-                raise
-            except Exception:
-                pass
+            if event == "status":
+                run_id = payload.get("run_id") or run_id
+            elif event == "token":
+                output_parts.append(payload.get("text", ""))
+            elif event == "done":
+                run_id = payload.get("run_id") or run_id
+            elif event == "error":
+                raise OrchestratorError(payload.get("message", "Agent run failed."))
 
         output_text = "".join(output_parts)
         agent_run = None
@@ -355,25 +370,20 @@ def delegate_to_agent(
     except Agent.DoesNotExist:
         return {"error": f"Agent '{agent_slug}' not found in the registry."}
 
-    from controlplane.services.agent_runtime import AgentRuntime
-    import json as _json
+    from controlplane.services.agent_runtime import PlatformAgentRuntime
 
-    runtime = AgentRuntime(agent=target, user_label=caller_label, channel="delegation")
+    runtime = PlatformAgentRuntime(agent=target, user_label=caller_label, channel="delegation")
     output_parts: list[str] = []
     run_id: str | None = None
 
-    for sse_line in runtime.stream(message):
-        if not sse_line.startswith("data:"):
+    for block in runtime.stream(message):
+        event, payload = _parse_sse(block)
+        if event is None:
             continue
-        try:
-            payload = _json.loads(sse_line[5:].strip())
-            et = payload.get("type", "")
-            if et == "token":
-                output_parts.append(payload.get("text", ""))
-            elif et == "done":
-                run_id = payload.get("run_id") or run_id
-        except Exception:
-            pass
+        if event == "token":
+            output_parts.append(payload.get("text", ""))
+        elif event in ("status", "done"):
+            run_id = payload.get("run_id") or run_id
 
     return {
         "agent_slug": agent_slug,

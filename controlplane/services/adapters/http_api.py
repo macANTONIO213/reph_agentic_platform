@@ -13,8 +13,11 @@ The adapter handles two response shapes:
 Set agent.endpoint_url to the target URL.
 Optionally set HTTP_API_BEARER_TOKEN in .env for Authorization headers.
 """
+import ipaddress
 import json
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Generator
 
@@ -23,6 +26,50 @@ from django.conf import settings
 from controlplane.models import AgentRun
 
 from .base import AgentAdapter, RuntimeEvent
+
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+class EndpointValidationError(RuntimeError):
+    """Raised when an agent endpoint_url is not safe to call (SSRF guard)."""
+
+
+def _validate_endpoint(url: str) -> None:
+    """
+    SSRF guard for agent endpoint URLs.
+
+    Rejects non-HTTP(S) schemes (e.g. file://, ftp://, gopher://) and any host
+    that resolves to a loopback, link-local (incl. cloud metadata 169.254.169.254),
+    multicast, unspecified, or reserved address.
+
+    Note: RFC1918 private ranges are intentionally permitted because this is an
+    enterprise integration platform whose agents may legitimately call internal
+    corporate hosts. This check is best-effort and does not fully defeat DNS
+    rebinding; the registration path should also constrain endpoint_url.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        raise EndpointValidationError(
+            f"endpoint_url scheme '{parsed.scheme or '(none)'}' is not allowed; "
+            "only http and https are permitted."
+        )
+    host = parsed.hostname
+    if not host:
+        raise EndpointValidationError("endpoint_url has no host component.")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise EndpointValidationError(f"Could not resolve endpoint host '{host}': {exc}")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_loopback or ip.is_link_local or ip.is_multicast
+                or ip.is_unspecified or ip.is_reserved):
+            raise EndpointValidationError(
+                f"endpoint_url host '{host}' resolves to a blocked address ({ip})."
+            )
 
 
 class HttpApiAdapter(AgentAdapter):
@@ -45,6 +92,9 @@ class HttpApiAdapter(AgentAdapter):
             meta["model_id"] = "unconfigured"
             yield RuntimeEvent("token", {"text": text}).to_sse()
             return
+
+        # SSRF guard — validate the destination before issuing any request.
+        _validate_endpoint(self.agent.endpoint_url)
 
         body = json.dumps(
             {

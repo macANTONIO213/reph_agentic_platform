@@ -183,6 +183,33 @@ class GuardrailService:
 
         return findings
 
+    def scan_output(
+        self,
+        *,
+        text: str,
+        agent,
+        actor: str = "unknown",
+        run_id: str = "",
+        ip: str | None = None,
+    ) -> list[Finding]:
+        """
+        Scan a model's *output* for PII / credential / system-prompt leakage.
+
+        Unlike scan() this never raises: output is produced after generation (and,
+        in the streaming runtime, after tokens are already emitted), so the caller
+        decides what to do with the findings (e.g. withhold the stored response on
+        'block'). HIGH/MEDIUM findings are always written to AuditLog.
+        """
+        findings = self._run_rules(text)
+        if not findings:
+            return []
+        self._audit(findings, agent, actor, run_id, ip, action="guardrail.output_finding")
+        logger.warning(
+            "Guardrail OUTPUT findings for agent=%s run=%s findings=%s",
+            getattr(agent, "slug", "?"), run_id, [f.rule_id for f in findings],
+        )
+        return findings
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -204,7 +231,8 @@ class GuardrailService:
 
     @staticmethod
     def _audit(findings: list[Finding], agent, actor: str,
-               run_id: str, ip: str | None) -> None:
+               run_id: str, ip: str | None,
+               action: str = "guardrail.finding") -> None:
         # Lazy import to avoid circular at module level
         from controlplane.models import AuditLog
         noteworthy = [f for f in findings if f.severity in (Severity.HIGH, Severity.MEDIUM)]
@@ -212,7 +240,7 @@ class GuardrailService:
             return
         AuditLog.objects.create(
             actor=actor,
-            action="guardrail.finding",
+            action=action,
             resource_type="Agent",
             resource_id=str(agent.id),
             payload={
