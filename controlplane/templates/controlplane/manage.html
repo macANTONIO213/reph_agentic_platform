@@ -13,7 +13,17 @@
       <section class="platform-app" aria-label="Platform Management">
 
         <header class="platform-topbar">
-          <strong>Platform Management</strong>
+          <div class="relx-logo" aria-label="RELX — Platform Management">
+            <svg class="relx-logo__svg" width="38" height="38" viewBox="0 0 38 38" aria-hidden="true">
+              <path d="M19 2 A17 17 0 1 1 4.5 27" fill="none" stroke="#f47920" stroke-width="4" stroke-linecap="round"/>
+              <path d="M12 10 L12 28 M12 10 Q22 10 22 17 Q22 24 12 24 M18 24 L24 28" fill="none" stroke="#f47920" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <div class="relx-logo__divider"></div>
+            <div class="relx-logo__wordmark">
+              <span class="relx-logo__relx">RELX</span>
+              <span class="relx-logo__product">Platform Management</span>
+            </div>
+          </div>
           <div class="topbar-actions">
             <a class="admin-button" href="/">← Dashboard</a>
             <span class="topbar-user">{{ request.user.username }}</span>

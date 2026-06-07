@@ -1,19 +1,29 @@
 :root {
-  --page: #ffffff;
-  --paper: #f5f6f7;
-  --surface: #ffffff;
-  --ink: #2d2d2d;
-  --muted: #777777;
-  --line: #e2e2e2;
-  --dark: #2f2f2f;
-  --dark-2: #242424;
-  --orange: #f58220;
-  --orange-dark: #c96a16;
-  --green: #0b742d;
-  --blue: #146a86;
-  --cyan: #17a3cf;
-  --purple: #b02896;
+  /* ── RELX brand palette ──────────────────────────────────────────────── */
+  --relx-orange:      #f47920;   /* RELX primary orange                    */
+  --relx-orange-dark: #d4650c;   /* hover / pressed                        */
+  --relx-gray:        #6d6e70;   /* RELX body gray                         */
+  --relx-gray-dark:   #3d3d3d;   /* topbar / dark surfaces                 */
+  --relx-gray-mid:    #58595b;   /* headings / ink                         */
+
+  /* ── Semantic aliases (referenced throughout codebase) ──────────────── */
+  --page:        #ffffff;
+  --paper:       #f5f6f7;
+  --surface:     #ffffff;
+  --ink:         var(--relx-gray-mid);
+  --muted:       var(--relx-gray);
+  --line:        #e2e2e2;
+  --dark:        var(--relx-gray-dark);
+  --dark-2:      #2a2a2a;
+  --orange:      var(--relx-orange);
+  --orange-dark: var(--relx-orange-dark);
+  --green:       #0b742d;
+  --blue:        #146a86;
+  --cyan:        #17a3cf;
+  --purple:      #b02896;
   --soft-orange: #fff4ec;
+  --accent:      var(--relx-orange);
+
   font-family: Arial, Helvetica, sans-serif;
 }
 
@@ -1553,4 +1563,69 @@ td {
   outline: none;
   border-color: var(--accent, #6366f1);
   box-shadow: 0 0 0 2px rgba(99,102,241,.15);
+}
+
+/* ── RELX brand logo in topbar ───────────────────────────────────────────── */
+
+.relx-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.relx-logo__mark {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+/* The "R" swirl — approximated with a styled glyph */
+.relx-logo__r {
+  font-size: 30px;
+  font-weight: 900;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  color: var(--relx-orange);
+  line-height: 1;
+  letter-spacing: -2px;
+  margin-right: 4px;
+}
+
+.relx-logo__wordmark {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+
+.relx-logo__relx {
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  color: #ffffff;
+  font-family: Arial, Helvetica, sans-serif;
+  text-transform: uppercase;
+}
+
+.relx-logo__divider {
+  width: 1px;
+  height: 28px;
+  background: rgba(255,255,255,.35);
+  margin: 0 10px;
+  flex-shrink: 0;
+}
+
+.relx-logo__product {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  color: rgba(255,255,255,.7);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.relx-logo__svg {
+  flex-shrink: 0;
+  display: block;
 }
