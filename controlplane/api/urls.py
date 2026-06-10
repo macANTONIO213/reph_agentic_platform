@@ -55,4 +55,12 @@ urlpatterns = [
     path("workflow-runs/<uuid:run_id>/memory/",        views.shared_memory,           name="api_shared_memory"),
     # E3: Model router explain
     path("agents/<uuid:agent_id>/model-route/",        views.model_route_explain,     name="api_model_route"),
+    # F: Agent Factory
+    path("factory/insights/",                          views.factory_insights_list,              name="api_factory_insights_list"),
+    path("factory/insights/<uuid:insight_id>/",        views.factory_insight_detail,             name="api_factory_insight_detail"),
+    path("factory/insights/<uuid:insight_id>/generate-blueprint/", views.factory_insight_generate_blueprint, name="api_factory_generate_blueprint"),
+    path("factory/blueprints/",                        views.factory_blueprints_list,            name="api_factory_blueprints_list"),
+    path("factory/blueprints/<uuid:blueprint_id>/",    views.factory_blueprint_detail,           name="api_factory_blueprint_detail"),
+    path("factory/blueprints/<uuid:blueprint_id>/approve/", views.factory_blueprint_approve,     name="api_factory_blueprint_approve"),
+    path("factory/blueprints/<uuid:blueprint_id>/build/",   views.factory_blueprint_build,       name="api_factory_blueprint_build"),
 ]

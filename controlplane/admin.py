@@ -3,11 +3,11 @@ from django.contrib import messages
 from django.utils.html import format_html
 
 from .models import (
-    Agent, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
+    Agent, AgentBlueprint, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
     Approval, AuditLog, BudgetAlert,
     BusinessUnit, ConversationSession, DataConnector, Division,
     DocumentChunk, EvalCase, EvalRun, EvalSuite,
-    GovernanceReview, KnowledgeDocument, OrgProcess, OtelSpan,
+    GovernanceReview, KnowledgeDocument, OrgProcess, OtelSpan, ProcessInsight,
     SharedMemory, TelemetryEvent, UserProfile, Workflow, WorkflowRun,
     WorkflowTask, WorkflowTaskRun, WorkStream,
 )
@@ -584,3 +584,39 @@ class SharedMemoryAdmin(admin.ModelAdmin):
     list_filter   = ("agent",)
     search_fields = ("key", "written_by")
     readonly_fields = ("id", "created_at", "updated_at")
+
+
+# ── F: Agent Factory ──────────────────────────────────────────────────────────
+
+@admin.register(ProcessInsight)
+class ProcessInsightAdmin(admin.ModelAdmin):
+    list_display   = ("process_name", "finding_type", "business_unit",
+                      "source_reference", "blueprint_count_display", "created_at")
+    list_filter    = ("finding_type", "business_unit")
+    search_fields  = ("process_name", "summary", "source_reference")
+    readonly_fields = ("id", "created_at", "updated_at")
+
+    @admin.display(description="Blueprints")
+    def blueprint_count_display(self, obj):
+        return obj.blueprints.count()
+
+
+class AgentBlueprintInline(admin.TabularInline):
+    model         = AgentBlueprint
+    extra         = 0
+    fields        = ("version", "agent_name", "status", "risk_level",
+                     "opportunity_score", "approved_by", "approved_at")
+    readonly_fields = fields
+    can_delete    = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AgentBlueprint)
+class AgentBlueprintAdmin(admin.ModelAdmin):
+    list_display   = ("agent_name", "version", "status", "risk_level",
+                      "opportunity_score", "approved_by", "approved_at", "created_at")
+    list_filter    = ("status", "risk_level")
+    search_fields  = ("agent_name", "mission")
+    readonly_fields = ("id", "opportunity_score", "approved_at", "created_at", "updated_at")

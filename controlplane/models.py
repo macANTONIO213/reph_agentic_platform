@@ -1055,6 +1055,172 @@ class SharedMemory(models.Model):
         return bool(self.expires_at and self.expires_at <= timezone.now())
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Agent Factory — Process Intelligence Ingestion & Blueprint Lifecycle
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ProcessInsight(models.Model):
+    """
+    A normalised finding emitted by the Process Intelligence platform.
+
+    source_reference is a stable external ID used to deduplicate ingest —
+    re-posting the same reference updates the existing record rather than
+    creating a duplicate.
+    """
+    class FindingType(models.TextChoices):
+        BOTTLENECK             = "bottleneck",             "Bottleneck"
+        EXCEPTION              = "exception",              "Exception Pattern"
+        CONTROL_GAP            = "control_gap",            "Control Gap"
+        AUTOMATION_OPPORTUNITY = "automation_opportunity", "Automation Opportunity"
+        REWORK_PATTERN         = "rework_pattern",         "Rework Pattern"
+        OTHER                  = "other",                  "Other"
+
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_reference = models.CharField(max_length=200, unique=True,
+                                        help_text="Stable external ID — used for deduplication.")
+    process_name     = models.CharField(max_length=200)
+    business_unit    = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="process_insights",
+    )
+    finding_type     = models.CharField(max_length=40, choices=FindingType.choices,
+                                        default=FindingType.OTHER)
+    summary          = models.TextField()
+    evidence         = models.JSONField(default=dict, blank=True,
+                                        help_text="Supporting metrics, examples, or observations.")
+    impact           = models.TextField(blank=True)
+    frequency        = models.CharField(max_length=200, blank=True)
+    systems_involved = models.JSONField(default=list, blank=True,
+                                        help_text="List of application/API/dataset names involved.")
+    recommended_action = models.TextField(blank=True)
+    risk_notes       = models.TextField(blank=True)
+    created_at       = models.DateTimeField(auto_now_add=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"[{self.finding_type}] {self.process_name}"
+
+
+class AgentBlueprint(models.Model):
+    """
+    A proposed agent design generated from a ProcessInsight.
+
+    Lifecycle:  draft → needs_data | needs_tool → approved → built → deployed → retired
+    Approval is required before the blueprint can be compiled into a runnable Agent.
+    """
+    class Status(models.TextChoices):
+        DRAFT      = "draft",      "Draft"
+        NEEDS_DATA = "needs_data", "Needs Data"
+        NEEDS_TOOL = "needs_tool", "Needs Tool"
+        APPROVED   = "approved",   "Approved"
+        BUILT      = "built",      "Built"
+        DEPLOYED   = "deployed",   "Deployed"
+        RETIRED    = "retired",    "Retired"
+
+    class RiskLevel(models.TextChoices):
+        LOW     = "low",     "Low"
+        MEDIUM  = "medium",  "Medium"
+        HIGH    = "high",    "High"
+        BLOCKED = "blocked", "Blocked"
+
+    # Allowed status transitions
+    ALLOWED_TRANSITIONS: dict = {
+        Status.DRAFT:      {Status.NEEDS_DATA, Status.NEEDS_TOOL, Status.APPROVED, Status.RETIRED},
+        Status.NEEDS_DATA: {Status.DRAFT, Status.NEEDS_TOOL, Status.APPROVED, Status.RETIRED},
+        Status.NEEDS_TOOL: {Status.DRAFT, Status.NEEDS_DATA, Status.APPROVED, Status.RETIRED},
+        Status.APPROVED:   {Status.BUILT, Status.DRAFT, Status.RETIRED},
+        Status.BUILT:      {Status.DEPLOYED, Status.RETIRED},
+        Status.DEPLOYED:   {Status.RETIRED},
+        Status.RETIRED:    set(),
+    }
+
+    id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    insight = models.ForeignKey(
+        ProcessInsight, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="blueprints",
+    )
+    version = models.PositiveSmallIntegerField(default=1)
+
+    # Identity
+    agent_name = models.CharField(max_length=200)
+    mission    = models.TextField()
+
+    # Trigger
+    trigger = models.CharField(max_length=200, blank=True,
+                               help_text="What causes the agent to run: schedule, event, API call, etc.")
+
+    # I/O definition
+    inputs  = models.JSONField(default=list, blank=True,
+                               help_text="Required inputs: process data, documents, system records.")
+    outputs = models.JSONField(default=list, blank=True,
+                               help_text="Expected outputs: artifacts, actions, recommendations.")
+
+    # Design
+    tools                = models.JSONField(default=list, blank=True,
+                                            help_text="Systems or APIs the agent needs.")
+    workflow_steps       = models.JSONField(default=list, blank=True,
+                                            help_text="Step-by-step operating logic.")
+    guardrails           = models.JSONField(default=list, blank=True,
+                                            help_text="Rules, permissions, and escalation conditions.")
+    human_approval_points = models.JSONField(default=list, blank=True,
+                                              help_text="Steps where the agent must pause for human review.")
+    success_metrics      = models.JSONField(default=list, blank=True,
+                                            help_text="Cycle-time reduction, quality score, cost reduction, etc.")
+
+    # Opportunity scoring  (0–10 per dimension)
+    business_value_score  = models.PositiveSmallIntegerField(
+        default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
+    automation_fit_score  = models.PositiveSmallIntegerField(
+        default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
+    complexity_score      = models.PositiveSmallIntegerField(
+        default=0, validators=[MinValueValidator(0), MaxValueValidator(10)],
+        help_text="Higher = more complex (lower is better for automation).")
+    risk_score            = models.PositiveSmallIntegerField(
+        default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
+    opportunity_score     = models.FloatField(
+        default=0.0,
+        help_text="Composite score: (business_value*0.35 + automation_fit*0.35 + (10-complexity)*0.2 + (10-risk)*0.1).")
+
+    # Status and risk
+    status     = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    risk_level = models.CharField(max_length=10, choices=RiskLevel.choices, default=RiskLevel.LOW)
+
+    # Missing requirements (prevent premature approval)
+    missing_tools = models.JSONField(default=list, blank=True,
+                                     help_text="Tools that must be available before build.")
+    missing_data  = models.JSONField(default=list, blank=True,
+                                     help_text="Data sources that must be accessible before build.")
+
+    # Approval gate
+    approved_by    = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="approved_blueprints",
+    )
+    approved_at    = models.DateTimeField(null=True, blank=True)
+    approval_notes = models.TextField(blank=True)
+
+    # Link to the Agent produced by the build compiler
+    built_agent = models.ForeignKey(
+        "Agent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="source_blueprints",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-opportunity_score", "-created_at"]
+
+    def __str__(self):
+        return f"{self.agent_name} v{self.version} [{self.status}]"
+
+    def can_transition_to(self, new_status: str) -> bool:
+        return new_status in self.ALLOWED_TRANSITIONS.get(self.status, set())
+
+
 class AuditLog(models.Model):
     """Append-only record of every privileged action on the platform."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

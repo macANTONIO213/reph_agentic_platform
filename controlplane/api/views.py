@@ -1045,3 +1045,327 @@ def shared_memory(request, run_id):
         return JsonResponse({"written": True, "key": key})
 
     return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+# ── Agent Factory — Phase F ───────────────────────────────────────────────────
+
+def _insight_dict(insight) -> dict:
+    return {
+        "id":                 str(insight.id),
+        "source_reference":   insight.source_reference,
+        "process_name":       insight.process_name,
+        "business_unit":      insight.business_unit.name if insight.business_unit else None,
+        "finding_type":       insight.finding_type,
+        "summary":            insight.summary,
+        "impact":             insight.impact,
+        "frequency":          insight.frequency,
+        "systems_involved":   insight.systems_involved,
+        "recommended_action": insight.recommended_action,
+        "risk_notes":         insight.risk_notes,
+        "blueprint_count":    insight.blueprints.count(),
+        "created_at":         insight.created_at.isoformat(),
+        "updated_at":         insight.updated_at.isoformat(),
+    }
+
+
+def _blueprint_dict(bp) -> dict:
+    return {
+        "id":                    str(bp.id),
+        "insight_id":            str(bp.insight_id) if bp.insight_id else None,
+        "version":               bp.version,
+        "agent_name":            bp.agent_name,
+        "mission":               bp.mission,
+        "trigger":               bp.trigger,
+        "inputs":                bp.inputs,
+        "outputs":               bp.outputs,
+        "tools":                 bp.tools,
+        "workflow_steps":        bp.workflow_steps,
+        "guardrails":            bp.guardrails,
+        "human_approval_points": bp.human_approval_points,
+        "success_metrics":       bp.success_metrics,
+        "business_value_score":  bp.business_value_score,
+        "automation_fit_score":  bp.automation_fit_score,
+        "complexity_score":      bp.complexity_score,
+        "risk_score":            bp.risk_score,
+        "opportunity_score":     bp.opportunity_score,
+        "status":                bp.status,
+        "risk_level":            bp.risk_level,
+        "missing_tools":         bp.missing_tools,
+        "missing_data":          bp.missing_data,
+        "approved_by":           bp.approved_by.username if bp.approved_by else None,
+        "approved_at":           bp.approved_at.isoformat() if bp.approved_at else None,
+        "approval_notes":        bp.approval_notes,
+        "built_agent_id":        str(bp.built_agent_id) if bp.built_agent_id else None,
+        "created_at":            bp.created_at.isoformat(),
+        "updated_at":            bp.updated_at.isoformat(),
+    }
+
+
+@login_required
+def factory_insights_list(request):
+    """
+    GET  /api/v1/factory/insights/  — list all process insights
+    POST /api/v1/factory/insights/  — ingest (upsert) a process insight
+    """
+    from controlplane.models import ProcessInsight, BusinessUnit
+
+    if request.method == "GET":
+        qs = ProcessInsight.objects.select_related("business_unit").order_by("-created_at")
+        finding_type = request.GET.get("finding_type")
+        if finding_type:
+            qs = qs.filter(finding_type=finding_type)
+        return JsonResponse({"insights": [_insight_dict(i) for i in qs[:200]]})
+
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body)
+        except Exception:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+        ref = body.get("source_reference", "").strip()
+        if not ref:
+            return JsonResponse({"error": "source_reference is required."}, status=400)
+        process_name = body.get("process_name", "").strip()
+        if not process_name:
+            return JsonResponse({"error": "process_name is required."}, status=400)
+        summary = body.get("summary", "").strip()
+        if not summary:
+            return JsonResponse({"error": "summary is required."}, status=400)
+
+        bu = None
+        bu_val = body.get("business_unit")
+        if bu_val:
+            try:
+                bu = BusinessUnit.objects.get(name=bu_val)
+            except BusinessUnit.DoesNotExist:
+                try:
+                    bu = BusinessUnit.objects.get(id=bu_val)
+                except (BusinessUnit.DoesNotExist, Exception):
+                    pass
+
+        defaults = {
+            "process_name":       process_name,
+            "summary":            summary,
+            "business_unit":      bu,
+            "finding_type":       body.get("finding_type",       "other"),
+            "impact":             body.get("impact",             ""),
+            "frequency":          body.get("frequency",          ""),
+            "systems_involved":   body.get("systems_involved",   []),
+            "recommended_action": body.get("recommended_action", ""),
+            "risk_notes":         body.get("risk_notes",         ""),
+            "evidence":           body.get("evidence",           {}),
+        }
+
+        insight, created = ProcessInsight.objects.update_or_create(
+            source_reference=ref,
+            defaults=defaults,
+        )
+        return JsonResponse(_insight_dict(insight), status=201 if created else 200)
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+@login_required
+def factory_insight_detail(request, insight_id):
+    """
+    GET   /api/v1/factory/insights/<id>/  — retrieve
+    PATCH /api/v1/factory/insights/<id>/  — update editable fields
+    """
+    from controlplane.models import ProcessInsight
+
+    try:
+        insight = ProcessInsight.objects.select_related("business_unit").get(id=insight_id)
+    except ProcessInsight.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_insight_dict(insight))
+
+    if request.method in ("PATCH", "PUT"):
+        try:
+            body = json.loads(request.body)
+        except Exception:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+        editable = [
+            "process_name", "finding_type", "summary", "impact",
+            "frequency", "systems_involved", "recommended_action",
+            "risk_notes", "evidence",
+        ]
+        for field in editable:
+            if field in body:
+                setattr(insight, field, body[field])
+        insight.save()
+        return JsonResponse(_insight_dict(insight))
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+@login_required
+@require_POST
+def factory_insight_generate_blueprint(request, insight_id):
+    """
+    POST /api/v1/factory/insights/<id>/generate-blueprint/
+    Generates a new AgentBlueprint from this insight.
+    """
+    from controlplane.models import ProcessInsight
+    from controlplane.services.factory import blueprint_generator
+
+    try:
+        insight = ProcessInsight.objects.select_related("business_unit").get(id=insight_id)
+    except ProcessInsight.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    blueprint = blueprint_generator.generate(insight)
+    return JsonResponse(_blueprint_dict(blueprint), status=201)
+
+
+@login_required
+def factory_blueprints_list(request):
+    """GET /api/v1/factory/blueprints/  — list blueprints, optional ?status= filter"""
+    from controlplane.models import AgentBlueprint
+
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed."}, status=405)
+
+    qs = AgentBlueprint.objects.select_related("insight", "approved_by", "built_agent")
+    status_filter = request.GET.get("status")
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    insight_filter = request.GET.get("insight_id")
+    if insight_filter:
+        qs = qs.filter(insight_id=insight_filter)
+
+    return JsonResponse({"blueprints": [_blueprint_dict(bp) for bp in qs[:200]]})
+
+
+@login_required
+def factory_blueprint_detail(request, blueprint_id):
+    """
+    GET   /api/v1/factory/blueprints/<id>/  — retrieve
+    PATCH /api/v1/factory/blueprints/<id>/  — update editable fields (draft/needs_* only)
+    """
+    from controlplane.models import AgentBlueprint
+
+    try:
+        bp = AgentBlueprint.objects.select_related(
+            "insight", "approved_by", "built_agent"
+        ).get(id=blueprint_id)
+    except AgentBlueprint.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_blueprint_dict(bp))
+
+    if request.method in ("PATCH", "PUT"):
+        if bp.status not in (
+            AgentBlueprint.Status.DRAFT,
+            AgentBlueprint.Status.NEEDS_DATA,
+            AgentBlueprint.Status.NEEDS_TOOL,
+        ):
+            return JsonResponse(
+                {"error": f"Cannot edit blueprint in '{bp.status}' status."},
+                status=400,
+            )
+        try:
+            body = json.loads(request.body)
+        except Exception:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+        editable = [
+            "agent_name", "mission", "trigger", "inputs", "outputs",
+            "tools", "workflow_steps", "guardrails", "human_approval_points",
+            "success_metrics", "missing_tools", "missing_data", "risk_level",
+        ]
+        for field in editable:
+            if field in body:
+                setattr(bp, field, body[field])
+
+        if "missing_data" in body or "missing_tools" in body:
+            if bp.missing_data:
+                bp.status = AgentBlueprint.Status.NEEDS_DATA
+            elif bp.missing_tools:
+                bp.status = AgentBlueprint.Status.NEEDS_TOOL
+            else:
+                bp.status = AgentBlueprint.Status.DRAFT
+
+        bp.save()
+        return JsonResponse(_blueprint_dict(bp))
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+@login_required
+@require_POST
+def factory_blueprint_approve(request, blueprint_id):
+    """
+    POST /api/v1/factory/blueprints/<id>/approve/
+    Body: {"notes": "optional approval notes"}
+    """
+    from controlplane.models import AgentBlueprint, AuditLog
+
+    try:
+        bp = AgentBlueprint.objects.get(id=blueprint_id)
+    except AgentBlueprint.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    if bp.status == AgentBlueprint.Status.APPROVED:
+        return JsonResponse({"error": "Blueprint is already approved."}, status=400)
+
+    if not bp.can_transition_to(AgentBlueprint.Status.APPROVED):
+        return JsonResponse(
+            {"error": f"Cannot approve blueprint in '{bp.status}' status."},
+            status=400,
+        )
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+
+    bp.status         = AgentBlueprint.Status.APPROVED
+    bp.approved_by    = request.user
+    bp.approved_at    = timezone.now()
+    bp.approval_notes = body.get("notes", "")
+    bp.save(update_fields=["status", "approved_by", "approved_at", "approval_notes", "updated_at"])
+
+    AuditLog.objects.create(
+        actor         = request.user.username,
+        action        = "blueprint_approved",
+        resource_type = "AgentBlueprint",
+        resource_id   = str(bp.id),
+        payload       = {"agent_name": bp.agent_name, "notes": bp.approval_notes},
+    )
+
+    return JsonResponse(_blueprint_dict(bp))
+
+
+@login_required
+@require_POST
+def factory_blueprint_build(request, blueprint_id):
+    """
+    POST /api/v1/factory/blueprints/<id>/build/
+    Compiles an approved blueprint into a runnable Agent.
+    """
+    from controlplane.models import AgentBlueprint
+    from controlplane.services.factory import build_compiler
+
+    try:
+        bp = AgentBlueprint.objects.select_related("insight__business_unit").get(id=blueprint_id)
+    except AgentBlueprint.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    try:
+        agent = build_compiler.build(bp, built_by=request.user.username)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    return JsonResponse({
+        "blueprint": _blueprint_dict(bp),
+        "agent": {
+            "id":     str(agent.id),
+            "slug":   agent.slug,
+            "name":   agent.name,
+            "status": agent.status,
+        },
+    }, status=201)
