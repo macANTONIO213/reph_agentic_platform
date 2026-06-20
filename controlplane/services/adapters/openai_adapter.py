@@ -22,7 +22,8 @@ from django.conf import settings
 from controlplane.models import AgentRun
 
 from .base import AgentAdapter, RuntimeEvent
-from .registry_tools import OPENAI_TOOL_SCHEMAS, RegistryToolsMixin
+from .registry_tools import RegistryToolsMixin
+from controlplane.services.tools import tool_registry
 
 
 class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
@@ -83,13 +84,15 @@ class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
         total_output = 0
         output_parts: list[str] = []
 
+        # Expose only the tools this agent selects (empty list → no tools).
+        tool_schemas = tool_registry.schemas_for(self.agent, fmt="openai")
+
         while True:
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                tools=OPENAI_TOOL_SCHEMAS,
-                tool_choice="auto",
-            )
+            create_kwargs = dict(model=model_id, messages=messages)
+            if tool_schemas:
+                create_kwargs["tools"] = tool_schemas
+                create_kwargs["tool_choice"] = "auto"
+            response = client.chat.completions.create(**create_kwargs)
             choice = response.choices[0]
             total_input += response.usage.prompt_tokens
             total_output += response.usage.completion_tokens
@@ -103,7 +106,7 @@ class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
                     inp = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     inp = {}
-                result = self._dispatch_tool(tc.function.name, inp, message)
+                result = tool_registry.dispatch(tc.function.name, inp, self._tool_ctx(message, run))
                 dur = int((time.perf_counter() - t0) * 1000)
                 yield self._record_tool(run, tc.function.name, inp, result, dur)
                 tool_results.append(

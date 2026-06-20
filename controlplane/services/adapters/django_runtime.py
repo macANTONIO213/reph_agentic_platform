@@ -12,7 +12,8 @@ from django.conf import settings
 from controlplane.models import AgentRun
 
 from .base import AgentAdapter, RuntimeEvent
-from .registry_tools import ANTHROPIC_TOOL_SCHEMAS, RegistryToolsMixin
+from .registry_tools import RegistryToolsMixin
+from controlplane.services.tools import tool_registry
 
 
 class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
@@ -54,15 +55,20 @@ class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
         total_output = 0
         output_parts: list[str] = []
 
+        # Expose only the tools this agent selects (empty list → no tools).
+        tool_schemas = tool_registry.schemas_for(self.agent, fmt="anthropic")
+
         while True:
-            response = client.messages.create(
+            create_kwargs = dict(
                 model=model_id,
                 max_tokens=4096,
                 system=system,
-                tools=ANTHROPIC_TOOL_SCHEMAS,
                 messages=messages,
                 thinking={"type": "adaptive"},
             )
+            if tool_schemas:
+                create_kwargs["tools"] = tool_schemas
+            response = client.messages.create(**create_kwargs)
             total_input += response.usage.input_tokens
             total_output += response.usage.output_tokens
 
@@ -71,7 +77,7 @@ class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
                 if block.type == "tool_use":
                     t0 = time.perf_counter()
                     inp = dict(block.input)
-                    result = self._dispatch_tool(block.name, inp, message)
+                    result = tool_registry.dispatch(block.name, inp, self._tool_ctx(message, run))
                     dur = int((time.perf_counter() - t0) * 1000)
                     yield self._record_tool(run, block.name, inp, result, dur)
                     tool_results.append(
