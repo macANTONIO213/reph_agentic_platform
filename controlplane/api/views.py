@@ -1369,3 +1369,92 @@ def factory_blueprint_build(request, blueprint_id):
             "status": agent.status,
         },
     }, status=201)
+
+
+# ── Agent Factory — Package ingestion (canonical handoff) ─────────────────────
+
+def _package_dict(pkg) -> dict:
+    return {
+        "id":                    str(pkg.id),
+        "package_id":            pkg.package_id,
+        "blueprint_id":          pkg.external_blueprint_id,
+        "package_version":       pkg.package_version,
+        "package_type":          pkg.package_type,
+        "status":                pkg.status,
+        "risk_tier":             pkg.risk_tier,
+        "validation_report":     pkg.validation_report,
+        "safety_boundary":       pkg.safety_boundary,
+        "approval_route":        pkg.approval_route,
+        "approval_progress":     pkg.approval_progress,
+        "tool_binding_plan":     pkg.tool_binding_plan,
+        "telemetry_contract":    pkg.telemetry_contract,
+        # Enforced safety posture (restrictive defaults applied)
+        "can_build_sandbox_agent":          pkg.can_build_sandbox_agent,
+        "can_bind_production_tools":        pkg.can_bind_production_tools,
+        "can_deploy_to_production":         pkg.can_deploy_to_production,
+        "requires_human_or_policy_approval": pkg.requires_human_or_policy_approval,
+        # Traceability links
+        "insight_id":            str(pkg.insight_id) if pkg.insight_id else None,
+        "blueprint_db_id":       str(pkg.blueprint_id) if pkg.blueprint_id else None,
+        "sandbox_agent_id":      str(pkg.sandbox_agent_id) if pkg.sandbox_agent_id else None,
+        "sandbox_agent_slug":    pkg.sandbox_agent.slug if pkg.sandbox_agent_id else None,
+        "sandbox_agent_status":  pkg.sandbox_agent.status if pkg.sandbox_agent_id else None,
+        "ingested_by":           pkg.ingested_by,
+        "created_at":            pkg.created_at.isoformat(),
+        "updated_at":            pkg.updated_at.isoformat(),
+    }
+
+
+@login_required
+def factory_packages_list(request):
+    """
+    GET  /api/v1/factory/packages/   — list ingested packages
+    POST /api/v1/factory/packages/   — ingest an agent_factory_package
+    """
+    from controlplane.models import AgentFactoryPackage
+    from controlplane.services.package_ingestor import (
+        package_ingestor, PackageValidationError,
+    )
+
+    if request.method == "GET":
+        qs = (AgentFactoryPackage.objects
+              .select_related("insight", "blueprint", "sandbox_agent")
+              .order_by("-created_at"))
+        status_filter = request.GET.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return JsonResponse({"packages": [_package_dict(p) for p in qs[:200]]})
+
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body)
+        except Exception:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+
+        try:
+            pkg = package_ingestor.ingest(body, ingested_by=request.user.username)
+        except PackageValidationError as exc:
+            # Validation failed — report missing/invalid sections clearly.
+            return JsonResponse(
+                {"error": "Package validation failed.", "validation_report": exc.report},
+                status=422,
+            )
+
+        return JsonResponse(_package_dict(pkg), status=201)
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+@login_required
+def factory_package_detail(request, package_id):
+    """GET /api/v1/factory/packages/<uuid:id>/ — retrieve a package."""
+    from controlplane.models import AgentFactoryPackage
+
+    try:
+        pkg = (AgentFactoryPackage.objects
+               .select_related("insight", "blueprint", "sandbox_agent")
+               .get(id=package_id))
+    except AgentFactoryPackage.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+
+    return JsonResponse(_package_dict(pkg))

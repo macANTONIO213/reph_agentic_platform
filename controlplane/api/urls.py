@@ -63,4 +63,6 @@ urlpatterns = [
     path("factory/blueprints/<uuid:blueprint_id>/",    views.factory_blueprint_detail,           name="api_factory_blueprint_detail"),
     path("factory/blueprints/<uuid:blueprint_id>/approve/", views.factory_blueprint_approve,     name="api_factory_blueprint_approve"),
     path("factory/blueprints/<uuid:blueprint_id>/build/",   views.factory_blueprint_build,       name="api_factory_blueprint_build"),
+    path("factory/packages/",                          views.factory_packages_list,              name="api_factory_packages_list"),
+    path("factory/packages/<uuid:package_id>/",        views.factory_package_detail,             name="api_factory_package_detail"),
 ]

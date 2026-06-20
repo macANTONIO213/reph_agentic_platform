@@ -3,7 +3,7 @@ from django.contrib import messages
 from django.utils.html import format_html
 
 from .models import (
-    Agent, AgentBlueprint, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
+    Agent, AgentBlueprint, AgentFactoryPackage, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
     Approval, AuditLog, BudgetAlert,
     BusinessUnit, ConversationSession, DataConnector, Division,
     DocumentChunk, EvalCase, EvalRun, EvalSuite,
@@ -620,3 +620,24 @@ class AgentBlueprintAdmin(admin.ModelAdmin):
     list_filter    = ("status", "risk_level")
     search_fields  = ("agent_name", "mission")
     readonly_fields = ("id", "opportunity_score", "approved_at", "created_at", "updated_at")
+
+
+@admin.register(AgentFactoryPackage)
+class AgentFactoryPackageAdmin(admin.ModelAdmin):
+    list_display   = ("package_id", "status", "risk_tier", "external_blueprint_id",
+                      "sandbox_agent", "ingested_by", "created_at")
+    list_filter    = ("status", "risk_tier", "package_version")
+    search_fields  = ("package_id", "external_blueprint_id", "ingested_by")
+    # Packages are ingested via the API/service — every field is read-only in
+    # admin to preserve the canonical handoff record and approval gates.
+    readonly_fields = (
+        "id", "package_id", "external_blueprint_id", "package_version", "package_type",
+        "status", "risk_tier", "ingested_by", "validation_report", "safety_boundary",
+        "source", "agent_blueprint", "agent_build_manifest", "tool_binding_plan",
+        "decision_policy", "evaluation_pack", "approval_route", "approval_progress",
+        "telemetry_contract", "telemetry_feedback_plan", "raw_package",
+        "insight", "blueprint", "sandbox_agent", "created_at", "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False

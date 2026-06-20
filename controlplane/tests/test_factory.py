@@ -21,9 +21,12 @@ from django.utils import timezone
 from controlplane.models import (
     Agent,
     AgentBlueprint,
+    AgentFactoryPackage,
     AuditLog,
     BusinessUnit,
+    EvalSuite,
     ProcessInsight,
+    TelemetryEvent,
 )
 from controlplane.services.factory import (
     BlueprintGenerator,
@@ -32,6 +35,10 @@ from controlplane.services.factory import (
     blueprint_generator,
     build_compiler,
     opportunity_scorer,
+)
+from controlplane.services.package_ingestor import (
+    PackageValidationError,
+    package_ingestor,
 )
 
 
@@ -633,3 +640,255 @@ class FactoryBlueprintAPITests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()["blueprint"]["status"], "built")
         self.assertIsNotNone(resp.json()["agent"]["id"])
+
+
+# ── Agent Factory Package ingestion ───────────────────────────────────────────
+
+def _make_package(**overrides) -> dict:
+    """Build a complete, valid agent_factory_package dict."""
+    pkg = {
+        "package_id":      "AFP-2026-001",
+        "blueprint_id":    "BP-2026-077",
+        "package_version": "agent-factory-package-v1",
+        "package_type":    "sandbox_agent_build",
+        "source": {
+            "process_insight": {
+                "source_reference":   "PI-PKG-001",
+                "process_name":       "Invoice Matching",
+                "finding_type":       "automation_opportunity",
+                "summary":            "Manual 3-way invoice matching is slow.",
+                "impact":             "Reduce cycle time 60%",
+                "frequency":          "500/day",
+                "systems_involved":   ["SAP", "Oracle"],
+                "recommended_action": "Automate matching",
+                "risk_notes":         "Financial data",
+                "business_unit":      "Finance",
+            },
+            "process_intelligence_output": {"normalized": True, "score": 0.82},
+        },
+        "agent_blueprint": {
+            "agent_name":     "Invoice Matching Agent",
+            "purpose":        "Automate 3-way invoice matching.",
+            "users":          ["AP clerks"],
+            "business_value": 8,
+            "risk_tier":      2,
+            "business_unit":  "Finance",
+        },
+        "agent_build_manifest": {
+            "runtime":  "django",
+            "trigger":  "Inbound invoice event",
+            "inputs":   [{"source": "SAP"}],
+            "outputs":  [{"artifact": "match_result"}],
+            "workflow_steps": [
+                {"step": "ingest", "description": "Receive invoice"},
+                {"step": "match",  "description": "3-way match"},
+            ],
+        },
+        "tool_binding_plan": [
+            {"name": "sap_connector", "kind": "tool", "binding_status": "available"},
+            {"name": "oracle_db",     "kind": "data", "binding_status": "pending"},
+        ],
+        "decision_policy": {
+            "rules": [{"rule": "audit_log", "description": "Log all actions"}],
+            "human_approval_points": [{"step": "match", "description": "Review mismatches"}],
+        },
+        "evaluation_pack": {
+            "test_cases": [
+                {"name": "Happy path", "input": "Match invoice 123", "expected_keywords": ["matched"]},
+                {"name": "Mismatch",   "input": "Match invoice 999", "must_not_contain": ["error"]},
+            ],
+            "confidence": 0.8,
+        },
+        "approval_route": {"name": "Finance risk board", "type": "policy"},
+        "approval_progress": {"state": "pending"},
+        "telemetry_contract": {"events": ["run_started", "run_completed"]},
+        "telemetry_feedback_plan": {"feeds": "blueprint"},
+        "safety_boundary": {
+            "can_build_sandbox_agent":           True,
+            "can_bind_production_tools":         False,
+            "can_deploy_to_production":          False,
+            "requires_human_or_policy_approval": True,
+        },
+    }
+    pkg.update(overrides)
+    return pkg
+
+
+class PackageIngestorServiceTests(TestCase):
+
+    def test_ingest_valid_package_creates_record(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertIsInstance(pkg, AgentFactoryPackage)
+        self.assertEqual(pkg.package_id, "AFP-2026-001")
+        self.assertEqual(pkg.external_blueprint_id, "BP-2026-077")
+        self.assertTrue(pkg.validation_report["ok"])
+
+    def test_accepts_wrapped_payload(self):
+        pkg = package_ingestor.ingest({"agent_factory_package": _make_package()}, ingested_by="alice")
+        self.assertEqual(pkg.package_id, "AFP-2026-001")
+
+    def test_creates_sandbox_agent_draft(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertIsNotNone(pkg.sandbox_agent)
+        self.assertEqual(pkg.sandbox_agent.status, Agent.Status.DRAFT)
+        self.assertEqual(pkg.status, AgentFactoryPackage.Status.SANDBOX_CREATED)
+
+    def test_traceability_links_to_source_insight(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertIsNotNone(pkg.insight)
+        self.assertEqual(pkg.insight.source_reference, "PI-PKG-001")
+        self.assertIsNotNone(pkg.blueprint)
+        self.assertEqual(pkg.blueprint.insight, pkg.insight)
+
+    def test_bindings_are_proposed_never_live(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        for b in pkg.tool_binding_plan:
+            self.assertFalse(b["live"])
+            self.assertNotIn(b["binding_status"], ("live", "production", "active", "connected"))
+        # No live data sources bound on the sandbox agent.
+        self.assertEqual(pkg.sandbox_agent.data_sources, [])
+
+    def test_live_binding_status_downgraded_to_proposed(self):
+        p = _make_package()
+        p["tool_binding_plan"] = [{"name": "prod_db", "binding_status": "live"}]
+        pkg = package_ingestor.ingest(p, ingested_by="alice")
+        self.assertEqual(pkg.tool_binding_plan[0]["binding_status"], "proposed")
+
+    def test_risk_tier_assigned_from_blueprint(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertEqual(pkg.risk_tier, 2)
+        self.assertEqual(pkg.sandbox_agent.risk_tier, 2)
+
+    def test_eval_cases_generated(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        suite = EvalSuite.objects.filter(agent=pkg.sandbox_agent).first()
+        self.assertIsNotNone(suite)
+        self.assertEqual(suite.cases.count(), 2)
+
+    def test_telemetry_emitted(self):
+        package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertTrue(
+            TelemetryEvent.objects.filter(event_type="factory_package_ingested").exists()
+        )
+
+    def test_audit_log_written(self):
+        package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertTrue(
+            AuditLog.objects.filter(action="factory_package_ingested").exists()
+        )
+
+    def test_blueprint_not_auto_approved(self):
+        pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
+        self.assertNotEqual(pkg.blueprint.status, AgentBlueprint.Status.APPROVED)
+        self.assertIsNone(pkg.blueprint.approved_by)
+
+    def test_no_sandbox_when_safety_boundary_forbids(self):
+        p = _make_package()
+        p["safety_boundary"]["can_build_sandbox_agent"] = False
+        pkg = package_ingestor.ingest(p, ingested_by="alice")
+        self.assertIsNone(pkg.sandbox_agent)
+        self.assertEqual(pkg.status, AgentFactoryPackage.Status.RECEIVED)
+
+    def test_empty_safety_boundary_rejected_as_critical(self):
+        p = _make_package()
+        p["safety_boundary"] = {}  # empty section is untrusted → rejected
+        with self.assertRaises(PackageValidationError) as cm:
+            package_ingestor.ingest(p, ingested_by="alice")
+        self.assertIn("safety_boundary", cm.exception.report["missing_sections"])
+
+    def test_safety_boundary_defaults_restrictive_when_missing_flags(self):
+        p = _make_package()
+        # Section present but individual flags omitted → restrictive defaults.
+        p["safety_boundary"] = {"note": "flags omitted on purpose"}
+        pkg = package_ingestor.ingest(p, ingested_by="alice")
+        self.assertFalse(pkg.can_build_sandbox_agent)
+        self.assertFalse(pkg.can_bind_production_tools)
+        self.assertFalse(pkg.can_deploy_to_production)
+        self.assertTrue(pkg.requires_human_or_policy_approval)
+
+    def test_invalid_version_raises(self):
+        p = _make_package(package_version="agent-factory-package-v2")
+        with self.assertRaises(PackageValidationError) as cm:
+            package_ingestor.ingest(p, ingested_by="alice")
+        self.assertFalse(cm.exception.report["ok"])
+        self.assertTrue(any("package_version" in e for e in cm.exception.report["errors"]))
+
+    def test_invalid_type_raises(self):
+        p = _make_package(package_type="production_agent_build")
+        with self.assertRaises(PackageValidationError):
+            package_ingestor.ingest(p, ingested_by="alice")
+
+    def test_missing_critical_section_raises(self):
+        p = _make_package()
+        del p["agent_build_manifest"]
+        with self.assertRaises(PackageValidationError) as cm:
+            package_ingestor.ingest(p, ingested_by="alice")
+        self.assertIn("agent_build_manifest", cm.exception.report["missing_sections"])
+
+    def test_missing_optional_section_warns_but_ingests(self):
+        p = _make_package()
+        del p["telemetry_feedback_plan"]
+        pkg = package_ingestor.ingest(p, ingested_by="alice")
+        self.assertTrue(pkg.validation_report["ok"])
+        self.assertIn("telemetry_feedback_plan", pkg.validation_report["missing_sections"])
+
+    def test_reingest_same_package_id_updates(self):
+        package_ingestor.ingest(_make_package(), ingested_by="alice")
+        package_ingestor.ingest(_make_package(blueprint_id="BP-NEW"), ingested_by="bob")
+        self.assertEqual(AgentFactoryPackage.objects.filter(package_id="AFP-2026-001").count(), 1)
+        pkg = AgentFactoryPackage.objects.get(package_id="AFP-2026-001")
+        self.assertEqual(pkg.external_blueprint_id, "BP-NEW")
+
+
+class PackageIngestAPITests(TestCase):
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_superuser(username="admin", password="admin")
+        self.client.login(username="admin", password="admin")
+
+    def _post(self, payload):
+        return self.client.post(
+            "/api/v1/factory/packages/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    def test_ingest_endpoint_creates_package(self):
+        resp = self._post(_make_package())
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["package_id"], "AFP-2026-001")
+        self.assertIsNotNone(data["sandbox_agent_id"])
+        self.assertEqual(data["sandbox_agent_status"], "draft")
+
+    def test_ingest_endpoint_reports_validation_errors(self):
+        resp = self._post(_make_package(package_version="bad"))
+        self.assertEqual(resp.status_code, 422)
+        data = resp.json()
+        self.assertIn("validation_report", data)
+        self.assertFalse(data["validation_report"]["ok"])
+
+    def test_safety_flags_visible_in_response(self):
+        data = self._post(_make_package()).json()
+        self.assertTrue(data["can_build_sandbox_agent"])
+        self.assertFalse(data["can_deploy_to_production"])
+        self.assertTrue(data["requires_human_or_policy_approval"])
+        self.assertIn("approval_route", data)
+
+    def test_list_packages(self):
+        self._post(_make_package())
+        resp = self.client.get("/api/v1/factory/packages/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(len(resp.json()["packages"]), 1)
+
+    def test_package_detail(self):
+        pkg_id = self._post(_make_package()).json()["id"]
+        resp = self.client.get(f"/api/v1/factory/packages/{pkg_id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["id"], pkg_id)
+
+    def test_requires_login(self):
+        self.client.logout()
+        resp = self._post(_make_package())
+        self.assertIn(resp.status_code, (302, 403))

@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>REPH Agentic AI Platform</title>
-    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-4">
+    <link rel="stylesheet" href="{% static 'controlplane/platform.css' %}?v=app-ui-10">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -32,6 +32,7 @@
             <button class="active" type="button" data-view-tab="deployments">Deployments</button>
             <button type="button" data-view-tab="monitoring">Monitoring</button>
             <button type="button" data-view-tab="catalog">Agent Catalog</button>
+            <button type="button" data-view-tab="factory">Agent Factory</button>
           </nav>
 
           <div class="workspace">
@@ -459,12 +460,14 @@
                           <th>Owner</th>
                           <th>Trust</th>
                           <th>Status</th>
+                          <th>Lifecycle</th>
                           <th>Use</th>
                         </tr>
                       </thead>
                       <tbody>
                         {% for agent in agents %}
                           <tr class="{% if forloop.first %}highlight{% endif %}"
+                              data-agent-id="{{ agent.id }}"
                               data-domain="{{ agent.business_unit }}"
                               data-org-unit="{{ agent.org_unit_id|default:'' }}"
                               data-org-division="{{ agent.org_division_id|default:'' }}"
@@ -497,7 +500,20 @@
                                 {% if agent.risk_tier <= 2 %}Certified{% else %}Verified{% endif %}
                               </span>
                             </td>
-                            <td><span class="catalog-status">{{ agent.get_status_display }}</span></td>
+                            <td><span class="catalog-status" data-status-label>{{ agent.get_status_display }}</span></td>
+                            <td>
+                              {% if agent.status == 'draft' %}
+                                <button class="button tiny primary promote-btn" type="button" data-next="review">→ Review</button>
+                              {% elif agent.status == 'review' %}
+                                <button class="button tiny primary promote-btn" type="button" data-next="pilot">→ Pilot</button>
+                              {% elif agent.status == 'pilot' %}
+                                <button class="button tiny primary promote-btn" type="button" data-next="production">→ Production</button>
+                              {% elif agent.status == 'production' %}
+                                <button class="button tiny secondary promote-btn" type="button" data-next="retired">Retire</button>
+                              {% else %}
+                                <span class="muted-label">—</span>
+                              {% endif %}
+                            </td>
                             <td>
                               <button class="use-button {% if forloop.first %}dark{% endif %}" type="button">
                                 {% if forloop.first %}Download{% else %}Use{% endif %}
@@ -506,7 +522,7 @@
                           </tr>
                         {% endfor %}
                         <tr class="catalog-empty-row" id="catalogEmptyRow" hidden>
-                          <td colspan="5">No agents match the selected filters.</td>
+                          <td colspan="6">No agents match the selected filters.</td>
                         </tr>
                       </tbody>
                     </table>
@@ -517,6 +533,107 @@
                     <p>The catalog changes agents from one-off projects into managed digital assets: owned, certified, discoverable and ready for reuse.</p>
                   </aside>
                 </div>
+              </div>
+            </section>
+
+            <!-- ── Agent Factory ────────────────────────────────────────── -->
+            <section class="factory-shell platform-view" id="factory" data-view-panel="factory" aria-labelledby="factory-title">
+              <header class="factory-topbar">
+                <div class="factory-title-row">
+                  <div>
+                    <span class="section-eyebrow">Agentic AI Governance</span>
+                    <h2 id="factory-title">Agent Factory</h2>
+                    <p>Turn process intelligence into governed, buildable agents</p>
+                  </div>
+                  <div class="factory-title-actions">
+                    <button class="button secondary small" id="factoryRefresh" type="button" title="Refresh">↻ Refresh</button>
+                    <button class="button secondary" id="openPackageModal" type="button">⬆ Upload Agent Factory Package</button>
+                    <button class="button primary" id="openIngestModal" type="button">+ Ingest insight</button>
+                  </div>
+                </div>
+                <nav class="factory-tabs" aria-label="Factory tabs">
+                  <button id="factoryInsightsTab" class="factory-tab active" type="button">
+                    Process Insights <span class="tab-badge" id="insightCount">0</span>
+                  </button>
+                  <button id="factoryBlueprintsTab" class="factory-tab" type="button">
+                    Agent Blueprints <span class="tab-badge" id="blueprintCount">0</span>
+                  </button>
+                  <button id="factoryPackagesTab" class="factory-tab" type="button">
+                    Factory Packages <span class="tab-badge" id="packageCount">0</span>
+                  </button>
+                </nav>
+              </header>
+
+              <!-- Insights panel -->
+              <div id="factoryInsightsPanel" class="factory-panel">
+                <table class="factory-table">
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Process / Reference</th>
+                      <th>Summary</th>
+                      <th>Business unit</th>
+                      <th>Blueprints</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="insightsTbody">
+                    <tr><td colspan="6" class="loading-cell">Click "Agent Factory" to load.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Blueprints panel -->
+              <div id="factoryBlueprintsPanel" class="factory-panel" hidden>
+                <div class="factory-filter-row">
+                  <label class="factory-filter-label" for="bpStatusFilter">Filter by status</label>
+                  <select id="bpStatusFilter" class="factory-filter-select">
+                    <option value="">All statuses</option>
+                    <option value="draft">Draft</option>
+                    <option value="needs_data">Needs data</option>
+                    <option value="needs_tool">Needs tool</option>
+                    <option value="approved">Approved</option>
+                    <option value="built">Built</option>
+                    <option value="deployed">Deployed</option>
+                    <option value="retired">Retired</option>
+                  </select>
+                </div>
+                <table class="factory-table">
+                  <thead>
+                    <tr>
+                      <th>Agent name / version</th>
+                      <th>Status</th>
+                      <th>Risk</th>
+                      <th>Score</th>
+                      <th>Approved by</th>
+                      <th>Built</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="blueprintsTbody">
+                    <tr><td colspan="7" class="loading-cell">Switch to this tab to load.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Packages panel -->
+              <div id="factoryPackagesPanel" class="factory-panel" hidden>
+                <table class="factory-table">
+                  <thead>
+                    <tr>
+                      <th>Package / Blueprint ref</th>
+                      <th>Status</th>
+                      <th>Risk tier</th>
+                      <th>Safety boundary</th>
+                      <th>Approval route</th>
+                      <th>Sandbox agent</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="packagesTbody">
+                    <tr><td colspan="7" class="loading-cell">Switch to this tab to load.</td></tr>
+                  </tbody>
+                </table>
               </div>
             </section>
 
@@ -682,9 +799,834 @@
       </div>
     </div>
 
+    <!-- ── Agent Factory modal: ingest insight ──────────────────────────── -->
+    <div id="ingestInsightModal" class="modal-backdrop" hidden aria-modal="true" role="dialog" aria-labelledby="ingestInsightTitle">
+      <div class="modal-card" style="max-width:680px">
+        <div class="modal-header">
+          <h2 id="ingestInsightTitle">Ingest Process Insight</h2>
+          <button class="modal-close" id="closeIngestModal" aria-label="Close">✕</button>
+        </div>
+
+        <!-- mode tabs -->
+        <div class="ingest-mode-tabs">
+          <button class="ingest-mode-tab active" id="modeTabUpload" type="button">Upload JSON</button>
+          <button class="ingest-mode-tab" id="modeTabManual" type="button">Manual entry</button>
+        </div>
+
+        <!-- ── upload pane ── -->
+        <div id="ingestUploadPane" class="ingest-upload-pane">
+          <div id="ingestDropZone" class="ingest-drop-zone" role="button" tabindex="0" aria-label="Drop JSON file here or click to browse">
+            <div class="drop-icon">📄</div>
+            <p class="drop-primary">Drop your JSON template here</p>
+            <p class="drop-secondary">or <span class="drop-link">click to browse</span></p>
+            <p class="drop-hint">Fields will be pre-filled in the form for review before ingestion.</p>
+            <input id="ingestFileInput" type="file" accept=".json,application/json" hidden>
+          </div>
+          <div class="ingest-template-row">
+            <span class="drop-hint">Need a template?</span>
+            <button class="button tiny secondary" id="downloadTemplate" type="button">⬇ Download template.json</button>
+          </div>
+          <div id="ingestUploadError" class="reg-form-error" hidden></div>
+        </div>
+
+        <!-- ── manual form pane ── -->
+        <form id="ingestInsightForm" class="reg-form" novalidate>
+          <div id="ingestFormPane" class="reg-form-body" style="padding-top:16px">
+            <div id="ingestPrefillBanner" class="ingest-prefill-banner" hidden>
+              ✓ Form pre-filled from uploaded file — review and edit before ingesting.
+            </div>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field req">
+                <span>Source reference</span>
+                <input type="text" name="source_reference" placeholder="e.g. PI-2026-001" required>
+              </label>
+              <label class="reg-field req">
+                <span>Finding type</span>
+                <select name="finding_type" required>
+                  <option value="automation_opportunity">Automation Opportunity</option>
+                  <option value="bottleneck">Bottleneck</option>
+                  <option value="exception">Exception Pattern</option>
+                  <option value="control_gap">Control Gap</option>
+                  <option value="rework_pattern">Rework Pattern</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+            </div>
+            <div class="reg-row">
+              <label class="reg-field req">
+                <span>Process name</span>
+                <input type="text" name="process_name" placeholder="e.g. Invoice Processing" required>
+              </label>
+            </div>
+            <div class="reg-row">
+              <label class="reg-field req">
+                <span>Summary</span>
+                <textarea name="summary" rows="2" placeholder="What was found?" required></textarea>
+              </label>
+            </div>
+            <div class="reg-row reg-row--2">
+              <label class="reg-field">
+                <span>Business impact</span>
+                <input type="text" name="impact" placeholder="e.g. Reduce cycle time by 40%">
+              </label>
+              <label class="reg-field">
+                <span>Frequency</span>
+                <input type="text" name="frequency" placeholder="e.g. 500 cases/day">
+              </label>
+            </div>
+            <div class="reg-row">
+              <label class="reg-field">
+                <span>Systems involved <small>(comma-separated)</small></span>
+                <input type="text" name="systems_involved" placeholder="e.g. SAP, Oracle, Salesforce">
+              </label>
+            </div>
+            <div class="reg-row">
+              <label class="reg-field">
+                <span>Recommended action</span>
+                <input type="text" name="recommended_action" placeholder="e.g. Automate pre-approval for low-value claims">
+              </label>
+            </div>
+            <div class="reg-row">
+              <label class="reg-field">
+                <span>Risk notes</span>
+                <input type="text" name="risk_notes" placeholder="e.g. GDPR applies to customer data">
+              </label>
+            </div>
+          </div>
+          <div id="ingestInsightError" class="reg-form-error" hidden></div>
+          <div class="modal-footer">
+            <button class="button secondary" type="button" id="cancelIngestModal">Cancel</button>
+            <button class="button primary" type="submit" id="ingestSubmitBtn">Ingest insight</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ── Agent Factory modal: upload Agent Factory Package ─────────────── -->
+    <div id="packageModal" class="modal-backdrop" hidden aria-modal="true" role="dialog" aria-labelledby="packageModalTitle">
+      <div class="modal-card" style="max-width:680px">
+        <div class="modal-header">
+          <h2 id="packageModalTitle">Upload Agent Factory Package</h2>
+          <button class="modal-close" id="closePackageModal" aria-label="Close">✕</button>
+        </div>
+        <div class="reg-form-body" style="padding-top:16px">
+          <p class="drop-hint" style="margin-bottom:12px">
+            Ingests a complete <code>agent_factory_package</code> (v1) exported by the
+            Process Intelligence Platform. Creates a <strong>sandbox</strong> agent candidate only —
+            production tools are not bound and the agent is not deployed until approval succeeds.
+          </p>
+          <div id="packageDropZone" class="ingest-drop-zone" role="button" tabindex="0" aria-label="Drop package JSON here or click to browse">
+            <div class="drop-icon">📦</div>
+            <p class="drop-primary">Drop your Agent Factory Package here</p>
+            <p class="drop-secondary">or <span class="drop-link">click to browse</span></p>
+            <p class="drop-hint">Accepted: *.json &nbsp;·&nbsp; e.g. <code>agent_factory_package_&lt;package_id&gt;.json</code></p>
+            <input id="packageFileInput" type="file" accept=".json,application/json" hidden>
+          </div>
+          <div id="packageError" class="reg-form-error" hidden></div>
+          <div id="packageResult" class="package-result" hidden></div>
+        </div>
+        <div class="modal-footer">
+          <button class="button secondary" type="button" id="cancelPackageModal">Close</button>
+          <button class="button primary" type="button" id="packageIngestBtn" disabled>Ingest package</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Agent Factory modal: approve blueprint ────────────────────────── -->
+    <div id="approveModal" class="modal-backdrop" hidden aria-modal="true" role="dialog" aria-labelledby="approveModalTitle">
+      <div class="modal-card" style="max-width:480px">
+        <div class="modal-header">
+          <h2 id="approveModalTitle">Approve Blueprint</h2>
+          <button class="modal-close" id="closeApproveModal" aria-label="Close">✕</button>
+        </div>
+        <form id="approveForm" class="reg-form" novalidate>
+          <div class="reg-form-body" style="padding-top:16px">
+            <div class="reg-row">
+              <label class="reg-field">
+                <span>Approval notes <small>(optional)</small></span>
+                <textarea name="notes" rows="3" placeholder="Why are you approving this blueprint?"></textarea>
+              </label>
+            </div>
+          </div>
+          <div id="approveFormError" class="reg-form-error" hidden></div>
+          <div class="modal-footer">
+            <button class="button secondary" type="button" id="cancelApproveModal">Cancel</button>
+            <button class="button primary" type="submit" id="approveSubmitBtn">Approve</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="toast" class="toast" aria-live="polite"></div>
 
     <script src="{% static 'controlplane/platform.js' %}?v=app-ui-3"></script>
     <script src="{% static 'controlplane/register.js' %}?v=1"></script>
+    <script>
+    // ── Agent Factory UI ──────────────────────────────────────────────────────
+    (function () {
+      'use strict';
+
+      // ── state ──────────────────────────────────────────────────────────────
+      let factoryInsights = [];
+      let factoryBlueprints = [];
+      let factoryPackages = [];
+      let factoryView = 'insights'; // 'insights' | 'blueprints' | 'packages'
+      let pendingApproveBpId = null;
+      let pendingPackage = null; // parsed JSON awaiting ingest
+
+      // ── element refs ───────────────────────────────────────────────────────
+      const factorySection   = document.getElementById('factory');
+      const insightsTab      = document.getElementById('factoryInsightsTab');
+      const blueprintsTab    = document.getElementById('factoryBlueprintsTab');
+      const insightsPanel    = document.getElementById('factoryInsightsPanel');
+      const blueprintsPanel  = document.getElementById('factoryBlueprintsPanel');
+      const insightsTbody    = document.getElementById('insightsTbody');
+      const blueprintsTbody  = document.getElementById('blueprintsTbody');
+      const insightCount     = document.getElementById('insightCount');
+      const blueprintCount   = document.getElementById('blueprintCount');
+      const packagesTab      = document.getElementById('factoryPackagesTab');
+      const packagesPanel    = document.getElementById('factoryPackagesPanel');
+      const packagesTbody    = document.getElementById('packagesTbody');
+      const packageCount     = document.getElementById('packageCount');
+      const ingestBtn        = document.getElementById('openIngestModal');
+      const ingestModal      = document.getElementById('ingestInsightModal');
+      const closeIngest      = document.getElementById('closeIngestModal');
+      const cancelIngest     = document.getElementById('cancelIngestModal');
+      const ingestForm       = document.getElementById('ingestInsightForm');
+      const ingestError      = document.getElementById('ingestInsightError');
+      const approveModal     = document.getElementById('approveModal');
+      const closeApprove     = document.getElementById('closeApproveModal');
+      const cancelApprove    = document.getElementById('cancelApproveModal');
+      const approveForm      = document.getElementById('approveForm');
+      const approveFormError = document.getElementById('approveFormError');
+      const bpFilterEl       = document.getElementById('bpStatusFilter');
+      const refreshBtn       = document.getElementById('factoryRefresh');
+
+      if (!factorySection) return; // panel not rendered yet
+
+      // ── tab switching ──────────────────────────────────────────────────────
+      function showFactoryTab(tab) {
+        factoryView = tab;
+        insightsTab.classList.toggle('active', tab === 'insights');
+        blueprintsTab.classList.toggle('active', tab === 'blueprints');
+        if (packagesTab) packagesTab.classList.toggle('active', tab === 'packages');
+        insightsPanel.hidden   = tab !== 'insights';
+        blueprintsPanel.hidden = tab !== 'blueprints';
+        if (packagesPanel) packagesPanel.hidden = tab !== 'packages';
+      }
+      insightsTab.addEventListener('click', () => showFactoryTab('insights'));
+      blueprintsTab.addEventListener('click', () => showFactoryTab('blueprints'));
+      if (packagesTab) packagesTab.addEventListener('click', () => { showFactoryTab('packages'); loadPackages(); });
+
+      // ── data fetching ──────────────────────────────────────────────────────
+      async function loadInsights() {
+        insightsTbody.innerHTML = '<tr><td colspan="6" class="loading-cell">Loading…</td></tr>';
+        try {
+          const r = await fetch('/api/v1/factory/insights/');
+          const d = await r.json();
+          factoryInsights = d.insights || [];
+          renderInsights();
+        } catch (e) {
+          insightsTbody.innerHTML = '<tr><td colspan="6" class="loading-cell">Failed to load.</td></tr>';
+        }
+      }
+
+      async function loadBlueprints() {
+        blueprintsTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Loading…</td></tr>';
+        const filter = bpFilterEl ? bpFilterEl.value : '';
+        const url = '/api/v1/factory/blueprints/' + (filter ? '?status=' + filter : '');
+        try {
+          const r = await fetch(url);
+          const d = await r.json();
+          factoryBlueprints = d.blueprints || [];
+          renderBlueprints();
+        } catch (e) {
+          blueprintsTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Failed to load.</td></tr>';
+        }
+      }
+
+      async function loadPackages() {
+        if (!packagesTbody) return;
+        packagesTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Loading…</td></tr>';
+        try {
+          const r = await fetch('/api/v1/factory/packages/');
+          const d = await r.json();
+          factoryPackages = d.packages || [];
+          renderPackages();
+        } catch (e) {
+          packagesTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Failed to load.</td></tr>';
+        }
+      }
+
+      // ── renderers ──────────────────────────────────────────────────────────
+      const RISK_CLASS = {low:'tone-green', medium:'tone-orange', high:'tone-red', blocked:'tone-red'};
+      const STATUS_CLASS = {
+        draft:'status-draft', needs_data:'status-needs-data', needs_tool:'status-needs-tool',
+        approved:'status-approved', built:'status-built', deployed:'status-deployed', retired:'status-retired',
+      };
+
+      function scoreBar(val, max=10) {
+        const pct = Math.round((val / max) * 100);
+        return `<div class="score-bar" title="${val}/${max}"><div class="score-fill" style="width:${pct}%"></div></div>`;
+      }
+
+      function renderInsights() {
+        insightCount.textContent = factoryInsights.length;
+        if (!factoryInsights.length) {
+          insightsTbody.innerHTML = '<tr><td colspan="6" class="loading-cell">No insights yet. Ingest one to get started.</td></tr>';
+          return;
+        }
+        insightsTbody.innerHTML = factoryInsights.map(i => `
+          <tr>
+            <td><span class="type-badge">${i.finding_type.replace(/_/g,' ')}</span></td>
+            <td><strong>${esc(i.process_name)}</strong><br><small class="muted">${esc(i.source_reference)}</small></td>
+            <td>${esc(i.summary || '—')}</td>
+            <td>${esc(i.business_unit || '—')}</td>
+            <td><span class="bp-count">${i.blueprint_count}</span></td>
+            <td class="action-cell">
+              <button class="button tiny" data-insight-generate="${i.id}" title="Generate blueprint">Generate blueprint</button>
+            </td>
+          </tr>`).join('');
+
+        insightsTbody.querySelectorAll('[data-insight-generate]').forEach(btn => {
+          btn.addEventListener('click', () => generateBlueprint(btn.dataset.insightGenerate));
+        });
+      }
+
+      function renderBlueprints() {
+        blueprintCount.textContent = factoryBlueprints.length;
+        if (!factoryBlueprints.length) {
+          blueprintsTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No blueprints found.</td></tr>';
+          return;
+        }
+        blueprintsTbody.innerHTML = factoryBlueprints.map(bp => {
+          const statusCls = STATUS_CLASS[bp.status] || '';
+          const riskCls   = RISK_CLASS[bp.risk_level] || '';
+          const canApprove = ['draft','needs_data','needs_tool'].includes(bp.status);
+          const canBuild   = bp.status === 'approved';
+          return `
+          <tr>
+            <td><strong>${esc(bp.agent_name)}</strong><br><small class="muted">v${bp.version}</small></td>
+            <td><span class="status-chip ${statusCls}">${bp.status.replace(/_/g,' ')}</span></td>
+            <td><span class="risk-chip ${riskCls}">${bp.risk_level}</span></td>
+            <td>
+              <div class="score-group">
+                <span title="Opportunity score" class="opp-score">${bp.opportunity_score.toFixed(1)}</span>
+                ${scoreBar(bp.business_value_score)} BV
+                ${scoreBar(bp.automation_fit_score)} AF
+              </div>
+            </td>
+            <td>${bp.approved_by ? `<span class="muted">✓ ${esc(bp.approved_by)}</span>` : '—'}</td>
+            <td>${bp.built_agent_id ? '<span class="muted">✓ built</span>' : '—'}</td>
+            <td class="action-cell">
+              ${canApprove ? `<button class="button tiny primary" data-bp-approve="${bp.id}">Approve</button>` : ''}
+              ${canBuild   ? `<button class="button tiny primary" data-bp-build="${bp.id}">⚙ Build agent</button>` : ''}
+            </td>
+          </tr>`;
+        }).join('');
+
+        blueprintsTbody.querySelectorAll('[data-bp-approve]').forEach(btn => {
+          btn.addEventListener('click', () => openApproveModal(btn.dataset.bpApprove));
+        });
+        blueprintsTbody.querySelectorAll('[data-bp-build]').forEach(btn => {
+          btn.addEventListener('click', () => buildAgent(btn.dataset.bpBuild, btn));
+        });
+      }
+
+      const PKG_STATUS_CLASS = {
+        received:'status-draft', invalid:'tone-red', sandbox_created:'status-built',
+        approved:'status-approved', rejected:'tone-red',
+      };
+      function boundaryChip(label, allowed) {
+        const cls = allowed ? 'tone-green' : 'tone-red';
+        const mark = allowed ? '✓' : '✗';
+        return `<span class="risk-chip ${cls}" title="${label}">${mark} ${label}</span>`;
+      }
+      function renderPackages() {
+        if (!packagesTbody) return;
+        if (packageCount) packageCount.textContent = factoryPackages.length;
+        if (!factoryPackages.length) {
+          packagesTbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No packages yet. Upload an Agent Factory Package to get started.</td></tr>';
+          return;
+        }
+        packagesTbody.innerHTML = factoryPackages.map(p => {
+          const statusCls = PKG_STATUS_CLASS[p.status] || 'status-draft';
+          const route = (p.approval_route && (p.approval_route.name || p.approval_route.route || p.approval_route.type)) || '—';
+          const sandbox = p.sandbox_agent_id
+            ? `<span class="muted">✓ ${esc(p.sandbox_agent_slug || 'draft')} <small>(${esc(p.sandbox_agent_status || '')})</small></span>`
+            : '—';
+          return `
+          <tr>
+            <td><strong>${esc(p.package_id)}</strong><br><small class="muted">${esc(p.blueprint_id || 'no blueprint ref')}</small></td>
+            <td><span class="status-chip ${statusCls}">${p.status.replace(/_/g,' ')}</span></td>
+            <td><span class="risk-chip ${RISK_CLASS[['','low','medium','high','blocked'][p.risk_tier]] || ''}">Tier ${p.risk_tier}</span></td>
+            <td class="boundary-cell">
+              ${boundaryChip('sandbox', p.can_build_sandbox_agent)}
+              ${boundaryChip('prod tools', p.can_bind_production_tools)}
+              ${boundaryChip('deploy', p.can_deploy_to_production)}
+            </td>
+            <td>${esc(route)}${p.requires_human_or_policy_approval ? '<br><small class="muted">approval required</small>' : ''}</td>
+            <td>${sandbox}</td>
+            <td class="action-cell">
+              <button class="button tiny secondary" data-pkg-detail="${p.id}" title="View validation report">Details</button>
+            </td>
+          </tr>`;
+        }).join('');
+
+        packagesTbody.querySelectorAll('[data-pkg-detail]').forEach(btn => {
+          btn.addEventListener('click', () => showPackageDetail(btn.dataset.pkgDetail));
+        });
+      }
+
+      function showPackageDetail(pkgId) {
+        const p = factoryPackages.find(x => x.id === pkgId);
+        if (!p) return;
+        const vr = p.validation_report || {};
+        const lines = [];
+        if (vr.warnings && vr.warnings.length) lines.push('Warnings:\n  - ' + vr.warnings.join('\n  - '));
+        if (vr.missing_sections && vr.missing_sections.length) lines.push('Missing sections:\n  - ' + vr.missing_sections.join('\n  - '));
+        if (!lines.length) lines.push('Validation OK — all required sections present.');
+        alert(`Package ${p.package_id}\nStatus: ${p.status}\nRisk tier: ${p.risk_tier}\n\n` + lines.join('\n\n'));
+      }
+
+      // ── actions ────────────────────────────────────────────────────────────
+      async function generateBlueprint(insightId) {
+        toast('Generating blueprint…');
+        try {
+          const r = await fetch(`/api/v1/factory/insights/${insightId}/generate-blueprint/`, {
+            method:'POST', headers:{'X-CSRFToken': getCsrf()},
+          });
+          if (!r.ok) { const d = await r.json(); toast(d.error || 'Failed.', true); return; }
+          toast('Blueprint generated.');
+          await loadInsights();
+          await loadBlueprints();
+          showFactoryTab('blueprints');
+        } catch (e) { toast('Network error.', true); }
+      }
+
+      function openApproveModal(bpId) {
+        pendingApproveBpId = bpId;
+        approveForm.reset();
+        approveFormError.hidden = true;
+        approveModal.hidden = false;
+      }
+      function closeApproveModalFn() { approveModal.hidden = true; pendingApproveBpId = null; }
+      closeApprove.addEventListener('click', closeApproveModalFn);
+      cancelApprove.addEventListener('click', closeApproveModalFn);
+
+      approveForm.addEventListener('submit', async e => {
+        e.preventDefault();
+        if (!pendingApproveBpId) return;
+        const notes = approveForm.querySelector('[name=notes]').value;
+        approveSubmitBtn.disabled = true;
+        try {
+          const r = await fetch(`/api/v1/factory/blueprints/${pendingApproveBpId}/approve/`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+            body: JSON.stringify({notes}),
+          });
+          const d = await r.json();
+          if (!r.ok) { approveFormError.textContent = d.error || 'Failed.'; approveFormError.hidden = false; return; }
+          toast('Blueprint approved.');
+          closeApproveModalFn();
+          loadBlueprints();
+        } catch (e) { approveFormError.textContent = 'Network error.'; approveFormError.hidden = false; }
+        finally { approveSubmitBtn.disabled = false; }
+      });
+
+      async function buildAgent(bpId, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Building…';
+        try {
+          const r = await fetch(`/api/v1/factory/blueprints/${bpId}/build/`, {
+            method:'POST', headers:{'X-CSRFToken':getCsrf()},
+          });
+          const d = await r.json();
+          if (!r.ok) { toast(d.error || 'Build failed.', true); return; }
+          loadBlueprints();
+          // Show confirmation banner with link to catalog
+          showBuildSuccessBanner(d.agent.name);
+        } catch (e) { toast('Network error.', true); }
+        finally { btn.disabled = false; btn.textContent = '⚙ Build agent'; }
+      }
+
+      function showBuildSuccessBanner(agentName) {
+        const existing = document.getElementById('buildSuccessBanner');
+        if (existing) existing.remove();
+        const banner = document.createElement('div');
+        banner.id = 'buildSuccessBanner';
+        banner.className = 'build-success-banner';
+        banner.innerHTML = `
+          <span>✓ Agent <strong>${esc(agentName)}</strong> created in DRAFT status.</span>
+          <button class="button tiny secondary" id="goToCatalogBtn" type="button">View in Agent Catalog →</button>
+          <button class="build-banner-close" type="button" aria-label="Dismiss">✕</button>`;
+        // Insert at top of blueprints panel
+        blueprintsPanel.insertBefore(banner, blueprintsPanel.firstChild);
+        banner.querySelector('#goToCatalogBtn').addEventListener('click', () => {
+          // Switch to catalog tab and reload the page so server renders the new agent
+          window.location.href = window.location.pathname + '#catalog';
+          window.location.reload();
+        });
+        banner.querySelector('.build-banner-close').addEventListener('click', () => banner.remove());
+      }
+
+      // ── catalog promote ───────────────────────────────────────────────────
+      const PROMOTE_LABELS = {
+        review:     '→ Review',
+        pilot:      '→ Pilot',
+        production: '→ Production',
+        retired:    'Retire',
+      };
+      const PROMOTE_NEXT = {
+        draft:      'review',
+        review:     'pilot',
+        pilot:      'production',
+        production: 'retired',
+      };
+      const STATUS_DISPLAY = {
+        draft:      'Draft',
+        review:     'Review',
+        pilot:      'Pilot',
+        production: 'Production',
+        retired:    'Retired',
+      };
+
+      document.getElementById('agents').addEventListener('click', async (e) => {
+        const btn = e.target.closest('.promote-btn');
+        if (!btn) return;
+        const row = btn.closest('tr');
+        const agentId = row.dataset.agentId;
+        const nextStatus = btn.dataset.next;
+        if (!agentId || !nextStatus) return;
+
+        btn.disabled = true;
+        const origText = btn.textContent;
+        btn.textContent = '…';
+        try {
+          const r = await fetch(`/api/v1/agents/${agentId}/transition/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrf() },
+            body: JSON.stringify({ status: nextStatus }),
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            toast(d.error || 'Transition failed.', true);
+            btn.disabled = false;
+            btn.textContent = origText;
+            return;
+          }
+          // Update row in-place
+          const newStatus = d.status;
+          row.dataset.status = newStatus;
+          row.querySelector('[data-status-label]').textContent = STATUS_DISPLAY[newStatus] || newStatus;
+          const nextNext = PROMOTE_NEXT[newStatus];
+          if (nextNext) {
+            btn.dataset.next = nextNext;
+            btn.textContent = PROMOTE_LABELS[nextNext];
+            btn.disabled = false;
+            btn.className = nextNext === 'retired'
+              ? 'button tiny secondary promote-btn'
+              : 'button tiny primary promote-btn';
+          } else {
+            btn.replaceWith(Object.assign(document.createElement('span'), { className: 'muted-label', textContent: '—' }));
+          }
+          toast(`Agent moved to ${STATUS_DISPLAY[newStatus] || newStatus}.`);
+        } catch (err) {
+          toast('Network error.', true);
+          btn.disabled = false;
+          btn.textContent = origText;
+        }
+      });
+
+      // ── ingest modal ───────────────────────────────────────────────────────
+      const modeTabUpload  = document.getElementById('modeTabUpload');
+      const modeTabManual  = document.getElementById('modeTabManual');
+      const uploadPane     = document.getElementById('ingestUploadPane');
+      const formPane       = document.getElementById('ingestFormPane');
+      const dropZone       = document.getElementById('ingestDropZone');
+      const fileInput      = document.getElementById('ingestFileInput');
+      const uploadError    = document.getElementById('ingestUploadError');
+      const prefillBanner  = document.getElementById('ingestPrefillBanner');
+      const dlTemplate     = document.getElementById('downloadTemplate');
+
+      function openIngestModal() {
+        ingestForm.reset();
+        ingestError.hidden = true;
+        uploadError.hidden = true;
+        prefillBanner.hidden = true;
+        showIngestMode('upload');
+        ingestModal.hidden = false;
+      }
+
+      function showIngestMode(mode) {
+        const isUpload = mode === 'upload';
+        modeTabUpload.classList.toggle('active', isUpload);
+        modeTabManual.classList.toggle('active', !isUpload);
+        uploadPane.hidden = !isUpload;
+        formPane.hidden   = isUpload;
+        // footer always visible (belongs to the form)
+        document.querySelector('#ingestInsightForm .modal-footer').style.display = isUpload ? 'none' : '';
+      }
+
+      modeTabUpload.addEventListener('click', () => showIngestMode('upload'));
+      modeTabManual.addEventListener('click', () => showIngestMode('manual'));
+
+      ingestBtn.addEventListener('click', openIngestModal);
+      closeIngest.addEventListener('click', () => ingestModal.hidden = true);
+      cancelIngest.addEventListener('click', () => ingestModal.hidden = true);
+
+      // ── JSON template download ────────────────────────────────────────────
+      dlTemplate.addEventListener('click', () => {
+        const template = {
+          source_reference:   "PI-2026-001",
+          process_name:       "Invoice Processing",
+          finding_type:       "automation_opportunity",
+          summary:            "High-volume manual invoice matching can be automated.",
+          impact:             "Reduce processing time by 60%",
+          frequency:          "500 invoices/day",
+          systems_involved:   ["SAP", "Oracle Financials"],
+          recommended_action: "Deploy invoice matching agent.",
+          risk_notes:         ""
+        };
+        const blob = new Blob([JSON.stringify(template, null, 2)], {type:'application/json'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'process_insight_template.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+
+      // ── file drop / click ─────────────────────────────────────────────────
+      dropZone.addEventListener('click', () => fileInput.click());
+      dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+
+      dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+      dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+      dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        const file = e.dataTransfer.files[0];
+        if (file) parseAndPrefill(file);
+      });
+
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files[0]) parseAndPrefill(fileInput.files[0]);
+        fileInput.value = '';
+      });
+
+      function parseAndPrefill(file) {
+        uploadError.hidden = true;
+        if (!file.name.endsWith('.json') && file.type !== 'application/json') {
+          uploadError.textContent = 'Please upload a .json file.';
+          uploadError.hidden = false;
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = ev => {
+          let data;
+          try { data = JSON.parse(ev.target.result); }
+          catch { uploadError.textContent = 'Invalid JSON — could not parse file.'; uploadError.hidden = false; return; }
+
+          // Fill form fields
+          const f = ingestForm;
+          const set = (name, val) => {
+            const el = f.querySelector(`[name="${name}"]`);
+            if (!el || val == null) return;
+            el.value = Array.isArray(val) ? val.join(', ') : String(val);
+          };
+          set('source_reference',   data.source_reference);
+          set('process_name',       data.process_name);
+          set('finding_type',       data.finding_type);
+          set('summary',            data.summary);
+          set('impact',             data.impact);
+          set('frequency',          data.frequency);
+          set('systems_involved',   data.systems_involved);
+          set('recommended_action', data.recommended_action);
+          set('risk_notes',         data.risk_notes);
+
+          prefillBanner.hidden = false;
+          showIngestMode('manual');
+        };
+        reader.readAsText(file);
+      }
+
+      // ── form submit ────────────────────────────────────────────────────────
+      ingestForm.addEventListener('submit', async e => {
+        e.preventDefault();
+        const fd = new FormData(ingestForm);
+        const systems = (fd.get('systems_involved') || '').split(',').map(s=>s.trim()).filter(Boolean);
+        const payload = {
+          source_reference:   fd.get('source_reference'),
+          process_name:       fd.get('process_name'),
+          finding_type:       fd.get('finding_type'),
+          summary:            fd.get('summary'),
+          impact:             fd.get('impact'),
+          frequency:          fd.get('frequency'),
+          systems_involved:   systems,
+          recommended_action: fd.get('recommended_action'),
+          risk_notes:         fd.get('risk_notes'),
+        };
+        document.getElementById('ingestSubmitBtn').disabled = true;
+        try {
+          const r = await fetch('/api/v1/factory/insights/', {
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+            body: JSON.stringify(payload),
+          });
+          const d = await r.json();
+          if (!r.ok) { ingestError.textContent = d.error || 'Failed.'; ingestError.hidden = false; return; }
+          toast(r.status === 201 ? 'Insight ingested.' : 'Insight updated (duplicate reference).');
+          ingestModal.hidden = true;
+          loadInsights();
+        } catch (e) { ingestError.textContent = 'Network error.'; ingestError.hidden = false; }
+        finally { document.getElementById('ingestSubmitBtn').disabled = false; }
+      });
+
+      // ── Agent Factory Package upload modal ──────────────────────────────────
+      const packageBtn       = document.getElementById('openPackageModal');
+      const packageModal      = document.getElementById('packageModal');
+      const closePackage      = document.getElementById('closePackageModal');
+      const cancelPackage     = document.getElementById('cancelPackageModal');
+      const packageDropZone   = document.getElementById('packageDropZone');
+      const packageFileInput  = document.getElementById('packageFileInput');
+      const packageError      = document.getElementById('packageError');
+      const packageResult     = document.getElementById('packageResult');
+      const packageIngestBtn  = document.getElementById('packageIngestBtn');
+
+      function openPackageModal() {
+        pendingPackage = null;
+        if (packageError) packageError.hidden = true;
+        if (packageResult) { packageResult.hidden = true; packageResult.innerHTML = ''; }
+        if (packageIngestBtn) packageIngestBtn.disabled = true;
+        if (packageModal) packageModal.hidden = false;
+      }
+      function closePackageModalFn() { if (packageModal) packageModal.hidden = true; }
+
+      if (packageBtn)    packageBtn.addEventListener('click', openPackageModal);
+      if (closePackage)  closePackage.addEventListener('click', closePackageModalFn);
+      if (cancelPackage) cancelPackage.addEventListener('click', closePackageModalFn);
+
+      if (packageDropZone) {
+        packageDropZone.addEventListener('click', () => packageFileInput.click());
+        packageDropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') packageFileInput.click(); });
+        packageDropZone.addEventListener('dragover', e => { e.preventDefault(); packageDropZone.classList.add('dragover'); });
+        packageDropZone.addEventListener('dragleave', () => packageDropZone.classList.remove('dragover'));
+        packageDropZone.addEventListener('drop', e => {
+          e.preventDefault();
+          packageDropZone.classList.remove('dragover');
+          const file = e.dataTransfer.files[0];
+          if (file) parsePackageFile(file);
+        });
+      }
+      if (packageFileInput) {
+        packageFileInput.addEventListener('change', () => {
+          if (packageFileInput.files[0]) parsePackageFile(packageFileInput.files[0]);
+          packageFileInput.value = '';
+        });
+      }
+
+      function parsePackageFile(file) {
+        packageError.hidden = true;
+        packageResult.hidden = true;
+        packageIngestBtn.disabled = true;
+        pendingPackage = null;
+        if (!file.name.endsWith('.json') && file.type !== 'application/json') {
+          packageError.textContent = 'Please upload a .json file.';
+          packageError.hidden = false;
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = ev => {
+          let data;
+          try { data = JSON.parse(ev.target.result); }
+          catch { packageError.textContent = 'Invalid JSON — could not parse file.'; packageError.hidden = false; return; }
+          const body = data.agent_factory_package || data;
+          const ver = body.package_version || '(missing)';
+          packageResult.innerHTML =
+            `<div class="package-summary">📦 <strong>${esc(body.package_id || 'unknown')}</strong> · version <code>${esc(ver)}</code><br>` +
+            `<small class="muted">Review then click <strong>Ingest package</strong>. A sandbox agent will be created if the safety boundary allows it.</small></div>`;
+          packageResult.hidden = false;
+          pendingPackage = data;
+          packageIngestBtn.disabled = false;
+        };
+        reader.readAsText(file);
+      }
+
+      if (packageIngestBtn) {
+        packageIngestBtn.addEventListener('click', async () => {
+          if (!pendingPackage) return;
+          packageIngestBtn.disabled = true;
+          packageIngestBtn.textContent = 'Ingesting…';
+          packageError.hidden = true;
+          try {
+            const r = await fetch('/api/v1/factory/packages/', {
+              method:'POST',
+              headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+              body: JSON.stringify(pendingPackage),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+              const vr = d.validation_report || {};
+              const errs = (vr.errors || []).map(e => '• ' + e).join('<br>') || (d.error || 'Validation failed.');
+              packageError.innerHTML = errs;
+              packageError.hidden = false;
+              return;
+            }
+            const created = d.sandbox_agent_id ? `Sandbox agent created (DRAFT, risk tier ${d.risk_tier}).` : 'Package recorded (no sandbox agent — safety boundary).';
+            toast('Package ingested. ' + created);
+            closePackageModalFn();
+            showFactoryTab('packages');
+            loadPackages();
+          } catch (e) {
+            packageError.textContent = 'Network error.';
+            packageError.hidden = false;
+          } finally {
+            packageIngestBtn.disabled = false;
+            packageIngestBtn.textContent = 'Ingest package';
+          }
+        });
+      }
+
+      // ── filter ─────────────────────────────────────────────────────────────
+      if (bpFilterEl) bpFilterEl.addEventListener('change', loadBlueprints);
+      if (refreshBtn) refreshBtn.addEventListener('click', () => { loadInsights(); loadBlueprints(); loadPackages(); });
+
+      // ── load when tab becomes active ───────────────────────────────────────
+      document.querySelectorAll('[data-view-tab]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.viewTab === 'factory') { loadInsights(); loadBlueprints(); loadPackages(); }
+        });
+      });
+
+      // ── navigate to tab from URL hash (e.g. after build redirect) ──────────
+      (function () {
+        const hash = window.location.hash.replace('#', '');
+        if (!hash) return;
+        const target = document.querySelector(`[data-view-tab="${hash}"]`);
+        if (target) {
+          target.click();
+          window.history.replaceState(null, '', window.location.pathname);
+        }
+      })();
+
+      // ── helpers ────────────────────────────────────────────────────────────
+      function esc(s) {
+        return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+      function getCsrf() {
+        const el = document.querySelector('[name=csrfmiddlewaretoken]');
+        return el ? el.value : '';
+      }
+      function toast(msg, err=false) {
+        const el = document.getElementById('toast');
+        if (!el) return;
+        el.textContent = msg;
+        el.className = 'toast' + (err ? ' toast--error' : '');
+        el.classList.add('show');
+        setTimeout(() => el.classList.remove('show'), 3000);
+      }
+      const approveSubmitBtn = document.getElementById('approveSubmitBtn');
+    })();
+    </script>
   </body>
 </html>

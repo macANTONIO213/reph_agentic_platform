@@ -1221,6 +1221,113 @@ class AgentBlueprint(models.Model):
         return new_status in self.ALLOWED_TRANSITIONS.get(self.status, set())
 
 
+class AgentFactoryPackage(models.Model):
+    """
+    The canonical handoff object exported by the Process Intelligence Platform /
+    Agent Blueprint Factory — one consolidated package per automation opportunity.
+
+    Ingesting a package produces a *sandbox* agent candidate, never a production
+    agent.  Evaluation, risk classification, and approval gates all apply before
+    live activation.  The package's ``safety_boundary`` is authoritative: the
+    Agent Factory will not bind production tools or deploy to production
+    automatically, regardless of how complete the package looks.
+    """
+    PACKAGE_VERSION = "agent-factory-package-v1"
+    PACKAGE_TYPE    = "sandbox_agent_build"
+
+    class Status(models.TextChoices):
+        RECEIVED        = "received",        "Received"
+        INVALID         = "invalid",         "Invalid"
+        SANDBOX_CREATED = "sandbox_created", "Sandbox Agent Created"
+        APPROVED        = "approved",        "Approved"
+        REJECTED        = "rejected",        "Rejected"
+
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package_id      = models.CharField(
+        max_length=200, unique=True,
+        help_text="Stable package identifier from the exporter — used for dedup.",
+    )
+    external_blueprint_id = models.CharField(
+        max_length=200, blank=True,
+        help_text="blueprint_id linking back to the Agent Blueprint Factory record.",
+    )
+    package_version = models.CharField(max_length=60, default=PACKAGE_VERSION)
+    package_type    = models.CharField(max_length=60, default=PACKAGE_TYPE)
+
+    # ── Persisted package sections (canonical handoff) ──────────────────────────
+    source                  = models.JSONField(default=dict, blank=True,
+        help_text="process_insight + process_intelligence_output.")
+    agent_blueprint         = models.JSONField(default=dict, blank=True)
+    agent_build_manifest    = models.JSONField(default=dict, blank=True,
+        help_text="Runtime/build instructions for creating the sandbox agent.")
+    tool_binding_plan       = models.JSONField(default=list, blank=True,
+        help_text="Proposed systems/tools/data bindings — never live.")
+    decision_policy         = models.JSONField(default=dict, blank=True)
+    evaluation_pack         = models.JSONField(default=dict, blank=True)
+    approval_route          = models.JSONField(default=dict, blank=True)
+    approval_progress       = models.JSONField(default=dict, blank=True)
+    telemetry_contract      = models.JSONField(default=dict, blank=True)
+    telemetry_feedback_plan = models.JSONField(default=dict, blank=True)
+    safety_boundary         = models.JSONField(default=dict, blank=True,
+        help_text="Hard controls on what the Agent Factory may do.")
+
+    # ── Validation + provenance ─────────────────────────────────────────────────
+    validation_report = models.JSONField(default=dict, blank=True,
+        help_text="{ok: bool, errors: [], warnings: [], missing_sections: []}")
+    raw_package       = models.JSONField(default=dict, blank=True,
+        help_text="Full original package as received, for traceability.")
+
+    status      = models.CharField(max_length=20, choices=Status.choices, default=Status.RECEIVED)
+    risk_tier   = models.PositiveSmallIntegerField(
+        default=1, validators=[MinValueValidator(1), MaxValueValidator(4)])
+    ingested_by = models.CharField(max_length=120, blank=True)
+
+    # ── Links (traceability) ────────────────────────────────────────────────────
+    insight       = models.ForeignKey(
+        ProcessInsight, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="factory_packages",
+    )
+    blueprint     = models.ForeignKey(
+        AgentBlueprint, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="factory_packages",
+    )
+    sandbox_agent = models.ForeignKey(
+        "Agent", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="source_packages",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.package_id} [{self.status}]"
+
+    # ── safety_boundary helpers — restrictive defaults ──────────────────────────
+    def _sb_flag(self, key: str, default: bool) -> bool:
+        sb = self.safety_boundary if isinstance(self.safety_boundary, dict) else {}
+        val = sb.get(key, default)
+        return val if isinstance(val, bool) else default
+
+    @property
+    def can_build_sandbox_agent(self) -> bool:
+        return self._sb_flag("can_build_sandbox_agent", False)
+
+    @property
+    def can_bind_production_tools(self) -> bool:
+        return self._sb_flag("can_bind_production_tools", False)
+
+    @property
+    def can_deploy_to_production(self) -> bool:
+        return self._sb_flag("can_deploy_to_production", False)
+
+    @property
+    def requires_human_or_policy_approval(self) -> bool:
+        return self._sb_flag("requires_human_or_policy_approval", True)
+
+
 class AuditLog(models.Model):
     """Append-only record of every privileged action on the platform."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
