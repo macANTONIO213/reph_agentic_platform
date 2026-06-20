@@ -55,8 +55,12 @@ class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
         total_output = 0
         output_parts: list[str] = []
 
-        # Expose only the tools this agent selects (empty list → no tools).
-        tool_schemas = tool_registry.schemas_for(self.agent, fmt="anthropic")
+        # Expose only the tools this agent selects (empty list → no tools),
+        # including per-agent connector bindings (Layer 1).
+        tool_ctx = self._tool_ctx(message, run)
+        tool_schemas = tool_registry.schemas_for(
+            self.agent, fmt="anthropic", ctx=tool_ctx, extra_specs=self.tool_specs
+        )
 
         while True:
             create_kwargs = dict(
@@ -77,7 +81,7 @@ class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
                 if block.type == "tool_use":
                     t0 = time.perf_counter()
                     inp = dict(block.input)
-                    result = tool_registry.dispatch(block.name, inp, self._tool_ctx(message, run))
+                    result = tool_registry.dispatch(block.name, inp, tool_ctx, extra_specs=self.tool_specs)
                     dur = int((time.perf_counter() - t0) * 1000)
                     yield self._record_tool(run, block.name, inp, result, dur)
                     tool_results.append(

@@ -1328,6 +1328,86 @@ class AgentFactoryPackage(models.Model):
         return self._sb_flag("requires_human_or_policy_approval", True)
 
 
+class AgentToolBinding(models.Model):
+    """
+    Binds one tool (by registry name) to an agent, with a binding status that
+    controls whether/how it executes — the runtime teeth behind a package's
+    ``can_bind_production_tools`` safety boundary.
+
+    Lifecycle:  proposed → sandbox → live
+      proposed — declared only; not exposed to the model, not executable.
+      sandbox  — exposed; executes as a dry-run (validates inputs, NO external call).
+      live     — executes against the real DataConnector; requires approval.
+
+    A sandbox agent run (agent not yet pilot/production) always forces sandbox
+    behaviour regardless of binding status, so a candidate can be exercised
+    safely before any production binding exists.
+    """
+    class Status(models.TextChoices):
+        PROPOSED = "proposed", "Proposed"
+        SANDBOX  = "sandbox",  "Sandbox"
+        LIVE     = "live",     "Live"
+
+    id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent     = models.ForeignKey(
+        "Agent", on_delete=models.CASCADE, related_name="tool_bindings",
+    )
+    tool_name = models.CharField(
+        max_length=80, help_text="Registry tool name exposed to the model.",
+    )
+    connector = models.ForeignKey(
+        "DataConnector", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="tool_bindings",
+        help_text="Live target. Null until a real connector is attached.",
+    )
+    binding_status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PROPOSED,
+    )
+    operation   = models.CharField(
+        max_length=20, blank=True,
+        help_text="Connector operation: sql 'query'; rest 'get'/'post'.",
+    )
+    config      = models.JSONField(
+        default=dict, blank=True,
+        help_text="Tool parameters (e.g. base path, allowed params). No secrets.",
+    )
+    description = models.TextField(blank=True)
+
+    approved_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="approved_tool_bindings",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    created_by  = models.CharField(max_length=120, blank=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["agent", "tool_name"]
+        unique_together = [("agent", "tool_name")]
+
+    def __str__(self):
+        return f"{self.agent_id}:{self.tool_name} [{self.binding_status}]"
+
+    @property
+    def is_executable(self) -> bool:
+        """Sandbox and live bindings are executable; proposed is not."""
+        return self.binding_status in (self.Status.SANDBOX, self.Status.LIVE)
+
+    def is_live_authorized(self) -> bool:
+        """Live execution requires LIVE status AND a recorded approval."""
+        return self.binding_status == self.Status.LIVE and self.approved_at is not None
+
+    def effective_mode(self, ctx_mode: str = "live") -> str:
+        """
+        Resolve how this binding executes for a given run mode.
+        A sandbox run forces sandbox; live runs use 'live' only when authorized.
+        """
+        if ctx_mode == "sandbox":
+            return "sandbox"
+        return "live" if self.is_live_authorized() else "sandbox"
+
+
 class AuditLog(models.Model):
     """Append-only record of every privileged action on the platform."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

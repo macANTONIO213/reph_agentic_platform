@@ -24,9 +24,20 @@ class RuntimeEvent:
 
 
 class AgentAdapter(ABC):
-    def __init__(self, agent: Agent, user_label: str):
+    def __init__(
+        self,
+        agent: Agent,
+        user_label: str,
+        tool_mode: str = "live",
+        tool_specs: dict | None = None,
+        tool_bindings: dict | None = None,
+    ):
         self.agent = agent
         self.user_label = user_label
+        # Tool execution context (Layer 1): run mode + per-agent connector tools.
+        self.tool_mode = tool_mode
+        self.tool_specs = tool_specs or {}
+        self.tool_bindings = tool_bindings or {}
 
     @abstractmethod
     def execute(

@@ -113,11 +113,26 @@ class ToolRegistry:
             return bool(ctx and ctx.bindings.get(spec.name))
         return True
 
-    def schemas_for(self, agent, fmt: str = "anthropic", ctx: ToolContext | None = None) -> list[dict]:
-        """Return the schema list (Anthropic or OpenAI shape) for ``agent``."""
+    def schemas_for(
+        self,
+        agent,
+        fmt: str = "anthropic",
+        ctx: ToolContext | None = None,
+        extra_specs: dict[str, "ToolSpec"] | None = None,
+    ) -> list[dict]:
+        """
+        Return the schema list (Anthropic or OpenAI shape) for ``agent``.
+
+        ``extra_specs`` are per-agent, per-run tools (e.g. connector-backed
+        bindings from Layer 1) overlaid on top of the global builtins.
+        """
         out: list[dict] = []
         for name in self._selected_names(agent):
             spec = self._specs[name]
+            if not self._is_available(spec, agent, ctx):
+                continue
+            out.append(spec.openai_schema() if fmt == "openai" else spec.anthropic_schema())
+        for spec in (extra_specs or {}).values():
             if not self._is_available(spec, agent, ctx):
                 continue
             out.append(spec.openai_schema() if fmt == "openai" else spec.anthropic_schema())
@@ -130,9 +145,18 @@ class ToolRegistry:
         return [s.openai_schema() for s in self._specs.values()]
 
     # ── dispatch ──────────────────────────────────────────────────────────────
-    def dispatch(self, name: str, inp: dict, ctx: ToolContext) -> dict:
-        """Execute a tool by name, enforcing the risk and binding gates."""
-        spec = self._specs.get(name)
+    def dispatch(
+        self,
+        name: str,
+        inp: dict,
+        ctx: ToolContext,
+        extra_specs: dict[str, "ToolSpec"] | None = None,
+    ) -> dict:
+        """Execute a tool by name, enforcing the risk and binding gates.
+
+        ``extra_specs`` (per-run connector tools) take precedence over builtins.
+        """
+        spec = (extra_specs or {}).get(name) or self._specs.get(name)
         if spec is None:
             return {"error": f"Unknown tool: {name}"}
 

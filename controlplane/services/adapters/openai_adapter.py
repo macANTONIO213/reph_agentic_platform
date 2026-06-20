@@ -84,8 +84,12 @@ class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
         total_output = 0
         output_parts: list[str] = []
 
-        # Expose only the tools this agent selects (empty list → no tools).
-        tool_schemas = tool_registry.schemas_for(self.agent, fmt="openai")
+        # Expose only the tools this agent selects (empty list → no tools),
+        # including per-agent connector bindings (Layer 1).
+        tool_ctx = self._tool_ctx(message, run)
+        tool_schemas = tool_registry.schemas_for(
+            self.agent, fmt="openai", ctx=tool_ctx, extra_specs=self.tool_specs
+        )
 
         while True:
             create_kwargs = dict(model=model_id, messages=messages)
@@ -106,7 +110,7 @@ class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
                     inp = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     inp = {}
-                result = tool_registry.dispatch(tc.function.name, inp, self._tool_ctx(message, run))
+                result = tool_registry.dispatch(tc.function.name, inp, tool_ctx, extra_specs=self.tool_specs)
                 dur = int((time.perf_counter() - t0) * 1000)
                 yield self._record_tool(run, tc.function.name, inp, result, dur)
                 tool_results.append(

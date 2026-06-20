@@ -39,6 +39,8 @@ class RegistryToolsMixin:
             workflow_run=getattr(self, "_workflow_run", None),
             actor=getattr(self, "user_label", "agent"),
             message=message,
+            mode=getattr(self, "tool_mode", "live"),
+            bindings=getattr(self, "tool_bindings", {}) or {},
         )
 
     def _registry_search(self, message: str) -> dict:

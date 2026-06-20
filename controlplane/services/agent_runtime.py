@@ -121,7 +121,19 @@ class PlatformAgentRuntime:
             meta = {"output_text": "", "input_tokens": 0, "output_tokens": 0, "model_id": ""}
 
             adapter_cls = _select_adapter_class(self.agent)
-            adapter = adapter_cls(agent=self.agent, user_label=self.user_label)
+            # Layer 1: resolve per-agent connector tools and run mode.
+            # A non-live agent (draft/review) always runs tools in sandbox
+            # (dry-run) so candidates can be exercised without production access.
+            tool_mode = "live" if self.agent.is_live else "sandbox"
+            from controlplane.services.tools.bindings import toolset_for
+            tool_specs, tool_bindings = toolset_for(self.agent, tool_mode)
+            adapter = adapter_cls(
+                agent=self.agent,
+                user_label=self.user_label,
+                tool_mode=tool_mode,
+                tool_specs=tool_specs,
+                tool_bindings=tool_bindings,
+            )
             yield from adapter.execute(run, message, history, meta)
 
             # ── Output guardrail scan ─────────────────────────────────────────

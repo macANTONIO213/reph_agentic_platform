@@ -3,7 +3,7 @@ from django.contrib import messages
 from django.utils.html import format_html
 
 from .models import (
-    Agent, AgentBlueprint, AgentFactoryPackage, AgentEmbedding, AgentFeedback, AgentRun, AgentToolCall, AgentVersion,
+    Agent, AgentBlueprint, AgentFactoryPackage, AgentEmbedding, AgentFeedback, AgentRun, AgentToolBinding, AgentToolCall, AgentVersion,
     Approval, AuditLog, BudgetAlert,
     BusinessUnit, ConversationSession, DataConnector, Division,
     DocumentChunk, EvalCase, EvalRun, EvalSuite,
@@ -641,3 +641,12 @@ class AgentFactoryPackageAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(AgentToolBinding)
+class AgentToolBindingAdmin(admin.ModelAdmin):
+    list_display   = ("agent", "tool_name", "binding_status", "connector",
+                      "operation", "approved_by", "approved_at", "updated_at")
+    list_filter    = ("binding_status", "connector")
+    search_fields  = ("tool_name", "agent__name", "connector__name")
+    readonly_fields = ("id", "approved_by", "approved_at", "created_at", "updated_at")
