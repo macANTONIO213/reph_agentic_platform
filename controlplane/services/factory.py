@@ -353,9 +353,15 @@ class BuildCompiler:
             system_prompt     = system_prompt,
             status            = Agent.Status.DRAFT,
             risk_tier         = risk_tier,
-            tool_names        = [t.get("name", "") for t in (blueprint.tools or [])],
             org_unit          = bu_fk,
         )
+
+        # M2: materialise the blueprint's tools as sandbox/proposed bindings so
+        # the DRAFT agent is runnable (dry-run) immediately.  Never live.
+        from controlplane.services.tools.bindings import create_bindings_from_plan
+        bindings = create_bindings_from_plan(agent, blueprint.tools or [], created_by=built_by)
+        agent.tool_names = [b.tool_name for b in bindings]
+        agent.save(update_fields=["tool_names", "updated_at"])
 
         blueprint.built_agent = agent
         blueprint.status = AgentBlueprint.Status.BUILT

@@ -344,10 +344,6 @@ class PackageIngestor:
 
         platform = self._map_platform(manifest.get("runtime") or manifest.get("platform"))
 
-        # Proposed tool names only — never bound to live systems.
-        tool_names = [b.get("name") or b.get("system") or b.get("tool") for b in bindings]
-        tool_names = [t for t in tool_names if t]
-
         agent = Agent.objects.create(
             slug             = slug,
             name             = name,
@@ -361,10 +357,16 @@ class PackageIngestor:
             system_prompt    = self._build_system_prompt(pkg),
             status           = Agent.Status.DRAFT,   # sandbox only — never live
             risk_tier        = risk_tier,
-            tool_names       = tool_names,
             data_sources     = [],                   # no live data bindings
             org_unit         = bu_fk,
         )
+
+        # M2: materialise the tool_binding_plan as sandbox/proposed bindings —
+        # never live (consistent with safety_boundary.can_bind_production_tools).
+        from controlplane.services.tools.bindings import create_bindings_from_plan
+        tool_bindings = create_bindings_from_plan(agent, bindings, created_by=ingested_by)
+        agent.tool_names = [b.tool_name for b in tool_bindings]
+        agent.save(update_fields=["tool_names", "updated_at"])
 
         AuditLog.objects.create(
             actor         = ingested_by,
@@ -376,7 +378,8 @@ class PackageIngestor:
                 "agent_id": str(agent.id),
                 "agent_slug": slug,
                 "status": agent.status,
-                "proposed_tools": tool_names,
+                "proposed_tools": agent.tool_names,
+                "binding_count": len(tool_bindings),
             },
         )
         return agent

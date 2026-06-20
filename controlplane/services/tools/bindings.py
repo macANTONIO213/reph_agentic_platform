@@ -15,12 +15,18 @@ production systems. Promotion to ``live`` is an explicit, approval-gated step.
 from __future__ import annotations
 
 import logging
+import re
 
 from django.utils import timezone
 
 from controlplane.services.tools.registry import ToolContext, ToolSpec
 
 logger = logging.getLogger(__name__)
+
+
+def _slug_tool_name(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", str(raw).lower()).strip("_")
+    return s[:60] or "tool"
 
 
 # ── connector tool schemas ────────────────────────────────────────────────────
@@ -141,6 +147,96 @@ def toolset_for(agent, mode: str = "live") -> tuple[dict, dict]:
     bindings = resolve_bindings(agent)
     extra_specs = {name: build_connector_spec(b) for name, b in bindings.items()}
     return extra_specs, bindings
+
+
+# ── creation from a blueprint / package plan ───────────────────────────────────
+
+def _match_connector(name: str, target: str):
+    """Find a DataConnector whose name matches the declared tool/system."""
+    from controlplane.models import DataConnector
+    for candidate in (target, name):
+        if not candidate:
+            continue
+        conn = DataConnector.objects.filter(name__iexact=candidate, is_active=True).first()
+        if conn:
+            return conn
+    return None
+
+
+def _infer_operation(connector, declared_name: str) -> str:
+    if connector is not None:
+        return "query" if connector.connector_type == "sql" else "get"
+    return "query" if "sql" in (declared_name or "").lower() else "get"
+
+
+def create_bindings_from_plan(agent, plan, *, created_by: str = "factory", attach_connectors: bool = True):
+    """
+    Create AgentToolBinding rows from a blueprint's ``tools`` list or a package's
+    ``tool_binding_plan``.
+
+    Safety: a binding is created as SANDBOX when a real DataConnector is matched
+    (dry-run only until promoted), otherwise PROPOSED.  This helper NEVER creates
+    a live binding — that requires the explicit, approval-gated promote_to_live.
+
+    Idempotent: re-running for the same agent updates existing rows by tool_name.
+    Returns the list of bindings (ordered as in the plan).
+    """
+    from controlplane.models import AgentToolBinding
+
+    if isinstance(plan, dict):
+        # {"tools": [...], "data_sources": [...]} shape → flatten.
+        flat = []
+        for t in plan.get("tools", []) or []:
+            flat.append(t if isinstance(t, dict) else {"name": t})
+        for d in plan.get("data_sources", []) or []:
+            flat.append({**(d if isinstance(d, dict) else {"name": d}), "kind": "data"})
+        plan = flat
+    if not isinstance(plan, list):
+        return []
+
+    bindings = []
+    seen: set[str] = set()
+    for entry in plan:
+        if not isinstance(entry, dict):
+            entry = {"name": str(entry)}
+        raw_name = entry.get("name") or entry.get("system") or entry.get("tool") or entry.get("data_source")
+        target = entry.get("target") or entry.get("system") or entry.get("data_source") or ""
+        if not raw_name and not target:
+            continue
+
+        tool_name = _slug_tool_name(target or raw_name)
+        # De-duplicate within this plan (unique_together is (agent, tool_name)).
+        base = tool_name
+        i = 2
+        while tool_name in seen:
+            tool_name = f"{base}_{i}"
+            i += 1
+        seen.add(tool_name)
+
+        connector = _match_connector(raw_name, target) if attach_connectors else None
+        status = (
+            AgentToolBinding.Status.SANDBOX if connector is not None
+            else AgentToolBinding.Status.PROPOSED
+        )
+
+        binding, _ = AgentToolBinding.objects.update_or_create(
+            agent=agent,
+            tool_name=tool_name,
+            defaults={
+                "connector":      connector,
+                "binding_status": status,
+                "operation":      _infer_operation(connector, str(raw_name)),
+                "config": {
+                    "declared_name": raw_name,
+                    "target":        target,
+                    "source_status": entry.get("binding_status"),
+                },
+                "created_by": created_by,
+            },
+        )
+        bindings.append(binding)
+
+    return bindings
 
 
 # ── lifecycle ─────────────────────────────────────────────────────────────────
