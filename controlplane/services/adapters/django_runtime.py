@@ -43,7 +43,12 @@ class DjangoRuntimeAdapter(RegistryToolsMixin, AgentAdapter):
             yield from self._execute_fake(run, message, meta)
             return
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+            # A hung upstream must not pin a worker for the SDK default timeout.
+            timeout=float(getattr(settings, "LLM_CLIENT_TIMEOUT_SECONDS", 120)),
+            max_retries=int(getattr(settings, "LLM_CLIENT_MAX_RETRIES", 2)),
+        )
         model_id = self.agent.model_id or self.DEFAULT_MODEL
         system = (
             self.agent.system_prompt.strip()

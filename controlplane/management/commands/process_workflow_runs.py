@@ -41,9 +41,11 @@ class Command(BaseCommand):
         while True:
             loops += 1
             recovered = workflow_queue.recover_stale_running_runs(stale_after_seconds=stale_after)
+            recovered_tasks = workflow_queue.recover_stale_working_tasks(stale_after_seconds=stale_after)
             result = workflow_queue.process_pending_runs(limit=limit)
             self.stdout.write(
-                f"workflow-worker: recovered={recovered} processed={result['processed']} failed={result['failed']}"
+                f"workflow-worker: recovered={recovered} recovered_tasks={recovered_tasks} "
+                f"processed={result['processed']} failed={result['failed']}"
             )
 
             if once:

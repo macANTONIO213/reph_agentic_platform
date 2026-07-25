@@ -49,19 +49,33 @@ def run_agent_task_inline(task_id: str) -> str:
     agent/guardrail failure — the failure is recorded on the task and the
     terminal state string is returned. Returns the final state value.
     """
+    from django.db import transaction
+
     from controlplane.models import AgentRun, AsyncAgentTask
     from controlplane.services.agent_runtime import PlatformAgentRuntime
 
-    try:
-        task = AsyncAgentTask.objects.select_related("agent").get(id=task_id)
-    except AsyncAgentTask.DoesNotExist:
-        logger.warning("run_agent_task_inline: task %s not found", task_id)
-        return "missing"
-
-    if task.is_terminal:
-        return task.state
-
-    task.mark_working()
+    # Atomic claim: SUBMITTED → WORKING under a row lock. With acks_late a
+    # redelivered Celery message would otherwise let two workers both pass the
+    # is_terminal gate and run the agent twice (double LLM spend/side-effects).
+    with transaction.atomic():
+        task = (
+            AsyncAgentTask.objects.select_for_update()
+            .select_related("agent")
+            .filter(id=task_id)
+            .first()
+        )
+        if task is None:
+            logger.warning("run_agent_task_inline: task %s not found", task_id)
+            return "missing"
+        if task.state != AsyncAgentTask.State.SUBMITTED:
+            logger.info(
+                "run_agent_task_inline: task %s already %s — skipping duplicate delivery",
+                task_id, task.state,
+            )
+            return task.state
+        task.attempts += 1
+        task.save(update_fields=["attempts", "updated_at"])
+        task.mark_working()
 
     runtime = PlatformAgentRuntime(
         agent=task.agent,
@@ -118,6 +132,7 @@ class AgentTaskService:
         submitted_by: str = "system",
         context_id: str = "",
         channel: str = "a2a",
+        idempotency_key: str | None = None,
     ):
         """
         Create an AsyncAgentTask and dispatch it for execution.
@@ -125,16 +140,33 @@ class AgentTaskService:
         Returns the AsyncAgentTask immediately.  Under the celery backend the row
         is SUBMITTED and a worker will run it; under the db backend it is executed
         inline before returning (so its state is already terminal).
+
+        When ``idempotency_key`` is supplied, a duplicate submit returns the
+        existing task instead of executing the agent twice.
         """
+        from django.db import IntegrityError
+
         from controlplane.models import AsyncAgentTask
 
-        task = AsyncAgentTask.objects.create(
-            agent=agent,
-            input_message=message,
-            submitted_by=submitted_by,
-            context_id=context_id,
-            channel=channel,
-        )
+        if idempotency_key:
+            existing = AsyncAgentTask.objects.filter(idempotency_key=idempotency_key).first()
+            if existing is not None:
+                return existing
+        try:
+            task = AsyncAgentTask.objects.create(
+                agent=agent,
+                input_message=message,
+                submitted_by=submitted_by,
+                context_id=context_id,
+                channel=channel,
+                idempotency_key=idempotency_key or None,
+            )
+        except IntegrityError:
+            # Lost a concurrent race on the unique key — return the winner's task.
+            existing = AsyncAgentTask.objects.filter(idempotency_key=idempotency_key).first()
+            if existing is not None:
+                return existing
+            raise
 
         if _celery_enabled():
             from controlplane.tasks import execute_agent_task

@@ -1,0 +1,66 @@
+# Local production-parity stack: Postgres + Redis + web + Celery worker.
+# Mirrors the Render topology so concurrency/queue behaviour can be tested
+# against Postgres (not SQLite) before deploy.
+#
+#   docker compose up --build
+#   docker compose exec web python manage.py migrate
+#
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agentic_platform
+      POSTGRES_USER: agentic_platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentic_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-key-change-me}
+      DJANGO_DEBUG: "False"
+      ALLOWED_HOSTS: localhost,127.0.0.1,web
+      DATABASE_URL: postgres://agentic_platform:${POSTGRES_PASSWORD:-devpassword}@db:5432/agentic_platform
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      EXECUTION_BACKEND: celery
+      LOG_FORMAT: json
+      SECURE_SSL_REDIRECT: "False"
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-key-change-me}
+      DJANGO_DEBUG: "False"
+      DATABASE_URL: postgres://agentic_platform:${POSTGRES_PASSWORD:-devpassword}@db:5432/agentic_platform
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      EXECUTION_BACKEND: celery
+      LOG_FORMAT: json
+    command: ["celery", "-A", "agentic_platform", "worker", "--loglevel=info", "--concurrency=4", "--max-tasks-per-child=200"]
+
+volumes:
+  pgdata:

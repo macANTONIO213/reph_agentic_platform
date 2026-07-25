@@ -48,15 +48,21 @@ class OpenAIAdapter(RegistryToolsMixin, AgentAdapter):
         azure_endpoint = getattr(settings, "AZURE_OPENAI_ENDPOINT", "")
         openai_key = getattr(settings, "OPENAI_API_KEY", "")
 
+        # A hung upstream must not pin a worker for the SDK default (~10 min).
+        llm_timeout = float(getattr(settings, "LLM_CLIENT_TIMEOUT_SECONDS", 120))
+        llm_retries = int(getattr(settings, "LLM_CLIENT_MAX_RETRIES", 2))
+
         if azure_key and azure_endpoint:
             client = AzureOpenAI(
                 api_key=azure_key,
                 azure_endpoint=azure_endpoint,
                 api_version="2024-10-21",
+                timeout=llm_timeout,
+                max_retries=llm_retries,
             )
             default_model = getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
         elif openai_key:
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=llm_timeout, max_retries=llm_retries)
             default_model = self.DEFAULT_MODEL
         else:
             meta["output_text"] = (

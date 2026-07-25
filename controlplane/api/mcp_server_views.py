@@ -23,6 +23,8 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from controlplane.api.interop_auth import bearer_token_matches, session_csrf_failure
+
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -41,12 +43,9 @@ def _authenticate(request):
         return False, JsonResponse({"error": "MCP server is disabled."}, status=404)
     if request.user.is_authenticated:
         return True, None
-    tokens = set(getattr(settings, "MCP_SERVER_TOKENS", []) or [])
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[len("Bearer "):].strip()
-        if token and token in tokens:
-            return True, None
+    tokens = getattr(settings, "MCP_SERVER_TOKENS", []) or []
+    if bearer_token_matches(request, tokens):  # constant-time compare
+        return True, None
     return False, JsonResponse({"error": "Unauthorized."}, status=401)
 
 
@@ -87,6 +86,11 @@ def mcp_endpoint(request):
     ok, err = _authenticate(request)
     if not ok:
         return err
+    # Session browser callers must pass CSRF; csrf_exempt is only for bearer-token
+    # machine callers (see interop_auth.session_csrf_failure).
+    csrf_err = session_csrf_failure(request)
+    if csrf_err is not None:
+        return JsonResponse({"error": "CSRF verification failed."}, status=403)
 
     if request.method == "GET":
         return JsonResponse({

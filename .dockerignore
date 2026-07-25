@@ -1,0 +1,14 @@
+.git
+.github
+*.sqlite3
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+staticfiles/
+node_modules/
+.env
+*.md
+*.pptx
+.DS_Store

@@ -159,7 +159,13 @@ def llm_rank(intent: str, entries, *, model_id: str | None = None):
 
     model = model_id or getattr(settings, "BROKER_ROUTER_MODEL", _DEFAULT_ROUTER_MODEL)
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            # The router is on the request path — keep its timeout tight so a
+            # hung LLM falls back to deterministic routing quickly.
+            timeout=float(getattr(settings, "BROKER_ROUTER_TIMEOUT_SECONDS", 20)),
+            max_retries=0,
+        )
         response = client.messages.create(
             model=model,
             max_tokens=1024,

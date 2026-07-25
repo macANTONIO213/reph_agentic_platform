@@ -1025,11 +1025,12 @@ class WorkflowTask(models.Model):
 class WorkflowRun(models.Model):
     """An execution instance of a Workflow."""
     class Status(models.TextChoices):
-        PENDING   = "pending",   "Pending"
-        RUNNING   = "running",   "Running"
-        COMPLETED = "completed", "Completed"
-        FAILED    = "failed",    "Failed"
-        CANCELLED = "cancelled", "Cancelled"
+        PENDING     = "pending",     "Pending"
+        RUNNING     = "running",     "Running"
+        COMPLETED   = "completed",   "Completed"
+        FAILED      = "failed",      "Failed"
+        CANCELLED   = "cancelled",   "Cancelled"
+        DEAD_LETTER = "dead_letter", "Dead letter"
 
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workflow    = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name="runs")
@@ -1040,14 +1041,38 @@ class WorkflowRun(models.Model):
     outputs     = models.JSONField(default=dict, blank=True,
                                    help_text="Accumulated step outputs: {step_name: {key: value}}.")
     error       = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(
+        max_length=200, null=True, blank=True, default=None,
+        help_text="Caller-supplied dedup key: a second enqueue with the same key "
+                  "returns the existing run instead of executing twice.",
+    )
+    attempts    = models.PositiveSmallIntegerField(
+        default=0, help_text="Execution claims so far; runs exceeding the max are dead-lettered.",
+    )
     started_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-started_at"]
+        indexes = [models.Index(fields=["status", "started_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_workflowrun_idempotency_key",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.workflow.name} run {self.id}"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in (
+            self.Status.COMPLETED, self.Status.FAILED,
+            self.Status.CANCELLED, self.Status.DEAD_LETTER,
+        )
 
     @property
     def duration_ms(self) -> int | None:
@@ -1666,11 +1691,12 @@ class AsyncAgentTask(models.Model):
       submitted → working → completed | failed | canceled
     """
     class State(models.TextChoices):
-        SUBMITTED = "submitted", "Submitted"   # durably queued, not yet started
-        WORKING   = "working",   "Working"     # a worker is executing the agent
-        COMPLETED = "completed", "Completed"
-        FAILED    = "failed",    "Failed"
-        CANCELED  = "canceled",  "Canceled"
+        SUBMITTED   = "submitted",   "Submitted"   # durably queued, not yet started
+        WORKING     = "working",     "Working"     # a worker is executing the agent
+        COMPLETED   = "completed",   "Completed"
+        FAILED      = "failed",      "Failed"
+        CANCELED    = "canceled",    "Canceled"
+        DEAD_LETTER = "dead_letter", "Dead letter"  # poison task parked after max attempts
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     agent = models.ForeignKey(
@@ -1692,6 +1718,14 @@ class AsyncAgentTask(models.Model):
     input_message = models.TextField()
     output_text = models.TextField(blank=True, default="")
     error = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(
+        max_length=200, null=True, blank=True, default=None,
+        help_text="Caller-supplied dedup key: a second submit with the same key "
+                  "returns the existing task instead of executing twice.",
+    )
+    attempts = models.PositiveSmallIntegerField(
+        default=0, help_text="Execution claims so far; tasks exceeding the max are dead-lettered.",
+    )
 
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
@@ -1701,13 +1735,23 @@ class AsyncAgentTask(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["state", "created_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_asyncagenttask_idempotency_key",
+            ),
+        ]
 
     def __str__(self):
         return f"AsyncAgentTask {self.id} [{self.state}]"
 
     @property
     def is_terminal(self) -> bool:
-        return self.state in (self.State.COMPLETED, self.State.FAILED, self.State.CANCELED)
+        return self.state in (
+            self.State.COMPLETED, self.State.FAILED,
+            self.State.CANCELED, self.State.DEAD_LETTER,
+        )
 
     def mark_working(self, run=None) -> None:
         self.state = self.State.WORKING

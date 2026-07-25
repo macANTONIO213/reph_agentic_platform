@@ -1,0 +1,22 @@
+# Dependency pins for reproducible builds (supply-chain control C6).
+# Install with:  pip install -r requirements.txt -c constraints.txt
+# Regenerate after a deliberate upgrade:  pip freeze > constraints-candidate.txt,
+# review the diff, run the test suite, then update this file.
+anthropic==0.103.1
+celery==5.6.3
+dj-database-url==3.1.2
+Django==5.2.15
+gunicorn==26.0.0
+openai==2.41.0
+pgvector==0.4.2
+pypdf==6.11.0
+python-docx==1.2.0
+python-dotenv==1.2.2
+redis==6.4.0
+requests==2.34.2
+SQLAlchemy==2.0.50
+tiktoken==0.13.0
+urllib3==2.7.0
+whitenoise==6.12.0
+# boto3 / psycopg2-binary are platform-specific in this dev environment; pin them
+# from the production build's `pip freeze` on first deploy.

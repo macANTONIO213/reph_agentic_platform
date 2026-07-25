@@ -14,6 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
+from controlplane.api.interop_auth import bearer_token_matches
 from controlplane.models import (
     Agent, AgentFeedback, AgentRun, Approval, AuditLog,
     BusinessUnit, DataConnector, Division, EvalCase, EvalRun, EvalSuite,
@@ -378,7 +379,10 @@ def org_tree(request):
 @require_GET
 def feedback_low_rated(request):
     window = _window(request)
-    return JsonResponse({"runs": low_rated_runs(window)})
+    # Scope to the caller's business unit — low-rated run content (incl. user
+    # labels) must not leak across tenants for non-cross-tenant viewers.
+    enforced_bu_id = None if _is_cross_tenant(request.user) else _user_business_unit_id(request.user)
+    return JsonResponse({"runs": low_rated_runs(window, **_filters(request, enforced_bu_id))})
 
 
 # ── Governance review decisions ───────────────────────────────────────────────
@@ -668,6 +672,10 @@ def eval_run_suite(request, suite_id):
             return JsonResponse({"error": "Approver or admin role required to run evals."}, status=403)
 
     suite = get_object_or_404(EvalSuite, id=suite_id)
+    # IDOR guard: an approver in one BU must not run evals against an agent in
+    # another BU by guessing the suite UUID.
+    if not _can_access_agent(request.user, suite.agent):
+        return JsonResponse({"error": "You do not have access to this eval suite."}, status=403)
     run = eval_service.run_suite(suite=suite, triggered_by=request.user.username)
     return JsonResponse({
         "run_id": str(run.id),
@@ -1407,19 +1415,31 @@ def visualizer_graph(request):
 
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────
 
-@login_required
 @require_GET
 def prometheus_metrics(request):
     """
     GET /api/v1/metrics/
 
-    Returns Prometheus text exposition format.
-    Protect with HTTP Basic Auth or restrict to internal IPs in production.
-    Render: allow Grafana Cloud scraper to hit this endpoint.
+    Returns Prometheus text exposition format. Two auth paths:
+      - a session-authenticated platform_admin (human/dashboard); or
+      - a scraper presenting ``Authorization: Bearer <METRICS_SCRAPE_TOKEN>``
+        (constant-time compared) — a Prometheus/Grafana agent can't hold a
+        Django session, so this is how it scrapes.
+    When no scrape token is configured, only the session path is accepted.
     """
-    role_error = _require_role(request, "platform_admin")
-    if role_error is not None:
-        return role_error
+    from django.conf import settings as _settings
+
+    scrape_tokens = getattr(_settings, "METRICS_SCRAPE_TOKENS", []) or []
+    if scrape_tokens and bearer_token_matches(request, scrape_tokens):
+        authorized = True
+    elif request.user.is_authenticated:
+        role_error = _require_role(request, "platform_admin")
+        authorized = role_error is None
+        if not authorized:
+            return role_error
+    else:
+        return JsonResponse({"error": "Unauthorized."}, status=401)
+
     from controlplane.services.metrics import render_metrics
     from django.http import HttpResponse
     payload = render_metrics()

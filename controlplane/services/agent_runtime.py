@@ -149,7 +149,24 @@ class PlatformAgentRuntime:
                     ip=None,
                 )
             except Exception:
+                # Fail closed for blocking agents: a bug in leak detection must
+                # not silently ship an unscanned response. Log loudly and, when
+                # the agent is in block mode, withhold the stored output.
+                logger.exception(
+                    "Output guardrail scan failed for run %s; failing closed.", run.id
+                )
                 out_findings = []
+                if getattr(self.agent, "guardrail_level", "block") == "block":
+                    meta["output_text"] = (
+                        "[Response withheld: content guardrail scan failed and this "
+                        "agent enforces blocking.]"
+                    )
+                    yield RuntimeEvent("guardrail", {
+                        "run_id": str(run.id),
+                        "direction": "output",
+                        "scan_error": True,
+                        "findings": [],
+                    }).to_sse()
             if out_findings:
                 level = getattr(self.agent, "guardrail_level", "block")
                 high = [f for f in out_findings if f.severity == Severity.HIGH]

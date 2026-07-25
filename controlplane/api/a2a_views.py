@@ -19,6 +19,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
+from controlplane.api.interop_auth import bearer_token_matches, session_csrf_failure
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,12 +30,9 @@ def _authenticate(request):
         return False, JsonResponse({"error": "A2A server is disabled."}, status=404)
     if request.user.is_authenticated:
         return True, None
-    tokens = set(getattr(settings, "A2A_ACCESS_TOKENS", []) or [])
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[len("Bearer "):].strip()
-        if token and token in tokens:
-            return True, None
+    tokens = getattr(settings, "A2A_ACCESS_TOKENS", []) or []
+    if bearer_token_matches(request, tokens):  # constant-time compare
+        return True, None
     return False, JsonResponse({"error": "Unauthorized."}, status=401)
 
 
@@ -172,6 +171,12 @@ def rpc(request, slug):
     ok, err = _authenticate(request)
     if not ok:
         return err
+    # A session-authenticated browser caller must still pass CSRF (this POST is
+    # csrf_exempt only so bearer-token machine callers can reach it). Without
+    # this, a malicious page could force message/send with the victim's cookie.
+    csrf_err = session_csrf_failure(request)
+    if csrf_err is not None:
+        return JsonResponse({"error": "CSRF verification failed."}, status=403)
     try:
         payload = json.loads(request.body) if request.body else {}
     except Exception:

@@ -26,18 +26,20 @@ logger = logging.getLogger(__name__)
     max_retries=0,
 )
 def execute_workflow_run(self, run_id: str) -> dict:
-    """Execute a queued WorkflowRun by id. Idempotent-ish: a terminal run is skipped."""
-    from controlplane.models import WorkflowRun
+    """
+    Execute a queued WorkflowRun by id.
+
+    Idempotent: the run is claimed atomically (PENDING → RUNNING under a row
+    lock), so a redelivered message (acks_late) or a concurrent DB worker
+    finds it already claimed and skips — one run executes exactly once.
+    """
     from controlplane.services.orchestrator import orchestrator
+    from controlplane.services.workflow_queue import workflow_queue
 
-    try:
-        run = WorkflowRun.objects.get(id=run_id)
-    except WorkflowRun.DoesNotExist:
-        logger.warning("execute_workflow_run: run %s not found", run_id)
-        return {"run_id": run_id, "status": "missing"}
-
-    if run.status in (WorkflowRun.Status.COMPLETED, WorkflowRun.Status.FAILED):
-        return {"run_id": run_id, "status": run.status, "skipped": True}
+    run = workflow_queue.try_claim_run(run_id)
+    if run is None:
+        logger.info("execute_workflow_run: run %s already claimed/terminal or missing — skipping", run_id)
+        return {"run_id": run_id, "status": "skipped", "skipped": True}
 
     orchestrator.execute(run)
     run.refresh_from_db()

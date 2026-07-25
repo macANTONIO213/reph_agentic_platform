@@ -55,11 +55,19 @@ class BedrockAdapter(AgentAdapter):
             yield RuntimeEvent("token", {"text": text}).to_sse()
             return
 
+        from botocore.config import Config as BotoConfig
+
         client = boto3.client(
             "bedrock-runtime",
             region_name=region,
             aws_access_key_id=aws_key,
             aws_secret_access_key=aws_secret,
+            # A hung upstream must not pin a worker indefinitely.
+            config=BotoConfig(
+                connect_timeout=10,
+                read_timeout=float(getattr(settings, "LLM_CLIENT_TIMEOUT_SECONDS", 120)),
+                retries={"max_attempts": int(getattr(settings, "LLM_CLIENT_MAX_RETRIES", 2))},
+            ),
         )
 
         model_id = self.agent.model_id or self.DEFAULT_MODEL

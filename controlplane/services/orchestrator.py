@@ -30,9 +30,11 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,55 @@ class OrchestratorError(Exception):
     pass
 
 
+class AgentCircuitOpenError(OrchestratorError):
+    """Raised when an agent's circuit breaker is open — the call fails fast."""
+
+
+# ── Per-agent circuit breaker (same cache pattern as the connectors) ──────────
+# A repeatedly-failing agent must not be hammered by every workflow in a fleet:
+# after N consecutive failures the breaker opens and calls fail fast until the
+# cooldown elapses.
+
+def _agent_failures_key(agent) -> str:
+    return f"cb:agent:failures:{agent.id}"
+
+
+def _agent_open_until_key(agent) -> str:
+    return f"cb:agent:open_until:{agent.id}"
+
+
+def _assert_agent_circuit_closed(agent) -> None:
+    open_until = cache.get(_agent_open_until_key(agent))
+    if open_until and timezone.now() < open_until:
+        raise AgentCircuitOpenError(
+            f"Circuit breaker open for agent '{agent.slug}' after repeated failures. "
+            "Failing fast; retry after cooldown."
+        )
+
+
+def _register_agent_failure(agent) -> None:
+    threshold = int(getattr(settings, "AGENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5))
+    cooldown = int(getattr(settings, "AGENT_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 60))
+    key = _agent_failures_key(agent)
+    failures = cache.get(key, 0) + 1
+    cache.set(key, failures, timeout=max(cooldown, 60))
+    if failures >= threshold:
+        cache.set(
+            _agent_open_until_key(agent),
+            timezone.now() + timedelta(seconds=cooldown),
+            timeout=cooldown,
+        )
+        logger.error(
+            "Agent circuit breaker OPEN for '%s' (%s consecutive failures, cooldown %ss)",
+            agent.slug, failures, cooldown,
+        )
+
+
+def _clear_agent_failures(agent) -> None:
+    cache.delete(_agent_failures_key(agent))
+    cache.delete(_agent_open_until_key(agent))
+
+
 class OrchestratorService:
     """
     Synchronous workflow executor.
@@ -99,7 +150,14 @@ class OrchestratorService:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def start(self, workflow, *, inputs: dict | None = None, triggered_by: str = "system"):
+    def start(
+        self,
+        workflow,
+        *,
+        inputs: dict | None = None,
+        triggered_by: str = "system",
+        idempotency_key: str | None = None,
+    ):
         """
         Create a WorkflowRun for the given workflow.
         Does NOT execute it — call execute() separately.
@@ -111,6 +169,7 @@ class OrchestratorService:
             triggered_by=triggered_by,
             inputs=inputs or {},
             outputs={},
+            idempotency_key=idempotency_key or None,
         )
         logger.info("Workflow run %s created for '%s'", run.id, workflow.name)
         return run
@@ -119,11 +178,18 @@ class OrchestratorService:
         """
         Execute a pending WorkflowRun synchronously.
         Returns the WorkflowRun with final status set.
+
+        A terminal (completed/failed/cancelled/dead-lettered) run is returned
+        unchanged — execute() is a no-op after the run has finished, so a
+        duplicate dispatch can never re-run completed work.
         """
         from controlplane.models import WorkflowRun
 
+        if workflow_run.is_terminal:
+            return workflow_run
+
         workflow_run.status = WorkflowRun.Status.RUNNING
-        workflow_run.save(update_fields=["status"])
+        workflow_run.save(update_fields=["status", "updated_at"])
 
         try:
             tasks = list(workflow_run.workflow.tasks.select_related("agent").all())
@@ -183,7 +249,9 @@ class OrchestratorService:
                     else:
                         failed_steps.add(step_name)
                 if merged:
-                    workflow_run.save(update_fields=["outputs"])
+                    # Also serves as the liveness heartbeat: stale-run recovery
+                    # judges progress on updated_at, not started_at.
+                    workflow_run.save(update_fields=["outputs", "updated_at"])
 
             # Determine final status
             if failed_steps:
@@ -202,7 +270,7 @@ class OrchestratorService:
             logger.exception("Workflow run %s unexpected error", workflow_run.id)
         finally:
             workflow_run.completed_at = timezone.now()
-            workflow_run.save(update_fields=["status", "error", "outputs", "completed_at"])
+            workflow_run.save(update_fields=["status", "error", "outputs", "completed_at", "updated_at"])
 
         logger.info(
             "Workflow run %s finished: %s (%s ms)",
@@ -342,9 +410,15 @@ class OrchestratorService:
         """
         Invoke an agent synchronously.  Collects SSE events from the streaming
         runtime and returns the final output text + AgentRun instance.
+
+        Guarded by a per-agent circuit breaker: after repeated consecutive
+        failures the agent fails fast for a cooldown instead of being hammered
+        by every workflow in the fleet.
         """
         from controlplane.services.agent_runtime import PlatformAgentRuntime
         from controlplane.models import AgentRun
+
+        _assert_agent_circuit_closed(agent)
 
         runtime = PlatformAgentRuntime(
             agent=agent,
@@ -355,18 +429,23 @@ class OrchestratorService:
         output_parts: list[str] = []
         run_id: str | None = None
 
-        for block in runtime.stream(message):
-            event, payload = _parse_sse(block)
-            if event is None:
-                continue
-            if event == "status":
-                run_id = payload.get("run_id") or run_id
-            elif event == "token":
-                output_parts.append(payload.get("text", ""))
-            elif event == "done":
-                run_id = payload.get("run_id") or run_id
-            elif event == "error":
-                raise OrchestratorError(payload.get("message", "Agent run failed."))
+        try:
+            for block in runtime.stream(message):
+                event, payload = _parse_sse(block)
+                if event is None:
+                    continue
+                if event == "status":
+                    run_id = payload.get("run_id") or run_id
+                elif event == "token":
+                    output_parts.append(payload.get("text", ""))
+                elif event == "done":
+                    run_id = payload.get("run_id") or run_id
+                elif event == "error":
+                    raise OrchestratorError(payload.get("message", "Agent run failed."))
+        except Exception:
+            _register_agent_failure(agent)
+            raise
+        _clear_agent_failures(agent)
 
         output_text = "".join(output_parts)
         agent_run = None

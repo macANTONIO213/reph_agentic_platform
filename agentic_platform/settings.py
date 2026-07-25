@@ -61,6 +61,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First in, last out: stamp the correlation id before anything else logs.
+    "controlplane.observability.CorrelationIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -105,12 +107,82 @@ else:
         }
     }
 
+# ── Cache backend ─────────────────────────────────────────────────────────────
+# Rate limiting AND the circuit breakers keep counters in the cache; with the
+# default per-process LocMemCache those counters are NOT shared across gunicorn
+# workers or Celery processes, so a limit of N effectively becomes N×workers and
+# a breaker only trips within one process. Point CACHE_URL (or REDIS_URL) at
+# Redis in any multi-process deployment so the controls are cluster-wide.
+_cache_url = os.environ.get("CACHE_URL") or os.environ.get("REDIS_URL", "")
+if _cache_url:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _cache_url,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "agentic-platform-locmem",
+        }
+    }
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# Structured, correlation-id-carrying logs. Set LOG_FORMAT=json in production for
+# one-line JSON suitable for a log aggregator; default "plain" stays readable in
+# local dev. LOG_LEVEL controls the app logger threshold.
+LOG_FORMAT = os.environ.get("LOG_FORMAT", "plain").lower()
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "correlation_id": {
+            "()": "controlplane.observability.CorrelationIdFilter",
+        },
+    },
+    "formatters": {
+        "plain": {
+            "format": "%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s: %(message)s",
+        },
+        "json": {
+            "()": "controlplane.observability.JsonLogFormatter",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "filters": ["correlation_id"],
+            "formatter": "json" if LOG_FORMAT == "json" else "plain",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        "controlplane": {
+            "handlers": ["console"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+}
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Manila"
@@ -136,6 +208,31 @@ CONNECTOR_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(
 CONNECTOR_CIRCUIT_BREAKER_COOLDOWN_SECONDS = int(
     os.environ.get("CONNECTOR_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "60")
 )
+# Per-agent orchestrator circuit breaker (production hardening A3).
+AGENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(
+    os.environ.get("AGENT_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5")
+)
+AGENT_CIRCUIT_BREAKER_COOLDOWN_SECONDS = int(
+    os.environ.get("AGENT_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "60")
+)
+# Dead-letter: max execution attempts before a run/task is parked (A2).
+WORKFLOW_RUN_MAX_ATTEMPTS = int(os.environ.get("WORKFLOW_RUN_MAX_ATTEMPTS", "3"))
+ASYNC_TASK_MAX_ATTEMPTS = int(os.environ.get("ASYNC_TASK_MAX_ATTEMPTS", "3"))
+# Outbound LLM client timeouts (A5) — a hung upstream must not pin a worker.
+LLM_CLIENT_TIMEOUT_SECONDS = float(os.environ.get("LLM_CLIENT_TIMEOUT_SECONDS", "120"))
+LLM_CLIENT_MAX_RETRIES = int(os.environ.get("LLM_CLIENT_MAX_RETRIES", "2"))
+BROKER_ROUTER_TIMEOUT_SECONDS = float(os.environ.get("BROKER_ROUTER_TIMEOUT_SECONDS", "20"))
+# SSRF egress hardening (C3) — opt-in DNS re-checking + private-range blocking.
+NET_GUARD_RESOLVE_DNS = os.environ.get("NET_GUARD_RESOLVE_DNS", "").lower() in ("true", "1", "yes")
+NET_GUARD_BLOCK_PRIVATE = os.environ.get("NET_GUARD_BLOCK_PRIVATE", "").lower() in ("true", "1", "yes")
+# Bearer tokens a Prometheus/Grafana scraper may present to /api/v1/metrics/
+# (session-less machine scraping). Empty ⇒ session+admin only.
+METRICS_SCRAPE_TOKENS = [
+    t.strip() for t in os.environ.get("METRICS_SCRAPE_TOKENS", "").split(",") if t.strip()
+]
+# Require an active EvalSuite before promoting agents at/above this risk tier
+# (0 disables the requirement; the passing-run gate still applies when a suite exists).
+EVAL_GATE_REQUIRE_SUITE_MIN_TIER = int(os.environ.get("EVAL_GATE_REQUIRE_SUITE_MIN_TIER", "0"))
 RETENTION_TELEMETRY_DAYS = int(os.environ.get("RETENTION_TELEMETRY_DAYS", "30"))
 RETENTION_SPANS_DAYS = int(os.environ.get("RETENTION_SPANS_DAYS", "30"))
 RETENTION_SESSIONS_DAYS = int(os.environ.get("RETENTION_SESSIONS_DAYS", "90"))

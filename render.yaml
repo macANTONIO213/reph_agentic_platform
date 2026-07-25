@@ -2,12 +2,13 @@ services:
   - type: web
     name: reph-agentic-platform
     runtime: python
-    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate
-    startCommand: gunicorn agentic_platform.wsgi:application
+    healthCheckPath: /readyz
+    buildCommand: pip install -r requirements.txt -c constraints.txt && python manage.py collectstatic --noinput && python manage.py migrate
+    startCommand: gunicorn agentic_platform.wsgi:application --workers 4 --timeout 120 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 100
     envVars:
       - key: DJANGO_SECRET_KEY
         generateValue: true
-      - key: DEBUG
+      - key: DJANGO_DEBUG
         value: "False"
       - key: ALLOWED_HOSTS
         sync: false
@@ -15,10 +16,69 @@ services:
         fromDatabase:
           name: reph-agentic-platform-db
           property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: reph-agentic-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: reph-agentic-redis
+          type: redis
+          property: connectionString
+      - key: EXECUTION_BACKEND
+        value: celery
+      - key: LOG_FORMAT
+        value: json
+      - key: NET_GUARD_RESOLVE_DNS
+        value: "True"
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: PYTHON_VERSION
         value: "3.12.0"
+
+  # Durable execution worker — runs WorkflowRun + AsyncAgentTask off the request
+  # thread. Restart policy makes worker crashes self-healing (plan A6).
+  - type: worker
+    name: reph-agentic-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt -c constraints.txt
+    startCommand: celery -A agentic_platform worker --loglevel=info --concurrency=4 --max-tasks-per-child=200
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        fromService:
+          name: reph-agentic-platform
+          type: web
+          envVarKey: DJANGO_SECRET_KEY
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reph-agentic-platform-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: reph-agentic-redis
+          type: redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: reph-agentic-redis
+          type: redis
+          property: connectionString
+      - key: EXECUTION_BACKEND
+        value: celery
+      - key: LOG_FORMAT
+        value: json
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
+  - type: redis
+    name: reph-agentic-redis
+    ipAllowList: []          # internal-only; reachable only by the web + worker
+    maxmemoryPolicy: noeviction
 
 databases:
   - name: reph-agentic-platform-db

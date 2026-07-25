@@ -3,10 +3,13 @@ name: release-gate
 on:
   pull_request:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
 
 jobs:
-  stabilization-gate:
+  test-suite:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -16,18 +19,70 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -c constraints.txt
 
-      - name: Security and regression gate
+      - name: Full test suite
+        env:
+          DJANGO_SECRET_KEY: ci-secret-key
+          DJANGO_DEBUG: "True"
+        run: |
+          python manage.py test controlplane -v 1
+
+      - name: Platform maturity + success-criteria gates
         env:
           DJANGO_SECRET_KEY: ci-secret-key
           DJANGO_DEBUG: "True"
         run: |
           python manage.py platform_maturity_report --fail-on-unready
           python manage.py enterprise_success_criteria --fail-on-miss
-          python manage.py test controlplane.tests.test_inspection_fixes -v 1
-          python manage.py test controlplane.tests.test_platform_maturity controlplane.tests.test_factory controlplane.tests.test_phase_c controlplane.tests.test_phase_e controlplane.tests.test_tool_bindings -v 1
+
+      - name: Deploy config sanity check (prod settings boot)
+        env:
+          DJANGO_SECRET_KEY: ci-secret-key-strong-enough-for-check
+          DJANGO_DEBUG: "False"
+          ALLOWED_HOSTS: ci.example.com
+        run: |
+          python manage.py check --deploy --fail-level ERROR
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install app dependencies + scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -c constraints.txt
+          pip install pip-audit bandit
+
+      - name: Dependency vulnerability audit (pip-audit)
+        run: |
+          pip-audit --strict
+
+      - name: Static security analysis (bandit)
+        run: |
+          bandit -r controlplane agentic_platform -x controlplane/tests --severity-level medium
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: sbom-cyclonedx.json

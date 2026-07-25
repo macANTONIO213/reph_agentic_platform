@@ -31,7 +31,13 @@ class ApiGlobalRateLimitMiddleware:
         self.get_response = get_response
         self.window_seconds = int(getattr(settings, "API_RATE_LIMIT_WINDOW_SECONDS", 60))
         self.limit = int(getattr(settings, "API_RATE_LIMIT_REQUESTS_PER_WINDOW", 120))
-        self.protected_prefixes = ("/api/v1/", "/api/agents/")
+        # Cover the frozen API, the run endpoints, the dashboard API, AND the
+        # external interop surface (/a2a/, token-auth, mutating) — the last was
+        # previously unthrottled, enabling token brute-force and abuse.
+        self.protected_prefixes = (
+            "/api/v1/", "/api/agents/", "/api/runs/", "/api/telemetry/",
+            "/api/monitoring/", "/api/org/", "/a2a/",
+        )
 
     def __call__(self, request):
         if request.path.startswith(self.protected_prefixes):
@@ -51,8 +57,15 @@ class ApiGlobalRateLimitMiddleware:
 
     def _is_limited(self, scope: str) -> bool:
         key = f"rl:global:{scope}"
-        count = cache.get(key, 0)
-        if count >= self.limit:
-            return True
-        cache.set(key, count + 1, timeout=self.window_seconds)
-        return False
+        # Atomic increment avoids the get-then-set TOCTOU race where concurrent
+        # requests undercount and slip past the limit. add() seeds the window
+        # (and its TTL) exactly once; incr() is atomic on real cache backends.
+        try:
+            if cache.add(key, 1, timeout=self.window_seconds):
+                return False
+            count = cache.incr(key)
+        except ValueError:
+            # Key expired between add() and incr(): reseed the window.
+            cache.add(key, 1, timeout=self.window_seconds)
+            return False
+        return count > self.limit

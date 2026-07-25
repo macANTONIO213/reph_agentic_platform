@@ -24,19 +24,41 @@ import ipaddress
 import socket
 import urllib.parse
 
+from django.conf import settings
+
 
 class BlockedDestinationError(ValueError):
     """Raised when a URL fails the SSRF policy (default error type)."""
 
 
-_BLOCKED_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+_BLOCKED_HOSTNAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::]"}
+
+
+def _resolve_default() -> bool:
+    """
+    Whether to DNS-resolve and re-check by default.
+
+    Off by default so hostname-only checks stay latency-free and the documented
+    private-range design (and its regression tests) hold.  Set
+    ``NET_GUARD_RESOLVE_DNS=True`` in production to defeat hostname → internal-IP
+    SSRF on every outbound path at once.
+    """
+    return bool(getattr(settings, "NET_GUARD_RESOLVE_DNS", False))
+
+
+def _block_private() -> bool:
+    """When True, RFC1918/private ranges are rejected too (opt-in for prod)."""
+    return bool(getattr(settings, "NET_GUARD_BLOCK_PRIVATE", False))
 
 
 def _is_blocked_ip(ip) -> bool:
-    return (
+    blocked = (
         ip.is_loopback or ip.is_link_local or ip.is_multicast
         or ip.is_unspecified or ip.is_reserved
     )
+    if _block_private():
+        blocked = blocked or ip.is_private
+    return blocked
 
 
 def _validate_resolved(host: str, parsed, error_cls: type[Exception]) -> None:
@@ -55,9 +77,17 @@ def validate_destination(
     url: str,
     *,
     error_cls: type[Exception] = BlockedDestinationError,
-    resolve: bool = False,
+    resolve: bool | None = None,
 ) -> None:
-    """Raise ``error_cls`` if ``url`` is not a permitted outbound destination."""
+    """
+    Raise ``error_cls`` if ``url`` is not a permitted outbound destination.
+
+    ``resolve`` defaults to the ``NET_GUARD_RESOLVE_DNS`` setting when not
+    explicitly given, so production can enable DNS-rechecking platform-wide
+    without touching every call site.
+    """
+    if resolve is None:
+        resolve = _resolve_default()
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise error_cls("URL must use http or https.")
@@ -67,13 +97,13 @@ def validate_destination(
     if host in _BLOCKED_HOSTNAMES:
         raise error_cls("URL host is not allowed.")
 
-    if resolve:
-        _validate_resolved(host, parsed, error_cls)
-        return
-
+    # Always check a literal-IP host, regardless of resolve.
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return  # Hostname (non-literal IP) — allowed; DNS is not resolved here.
-    if _is_blocked_ip(ip):
+        ip = None
+    if ip is not None and _is_blocked_ip(ip):
         raise error_cls(f"URL resolves to blocked address ({ip}).")
+
+    if resolve and ip is None:
+        _validate_resolved(host, parsed, error_cls)

@@ -6,13 +6,17 @@ deployed_at by calling Agent.save() directly.  All callers (UI, API, admin,
 management commands) must go through this service so that gate logic,
 state-machine enforcement, and audit logging happen exactly once.
 
-EvalRun gate: not yet implemented (EvalRun model not yet migrated).
-Tracked as deviation in DECISIONS.md.
+Production promotion enforces three hard gates (approved review, valid approval
+token, and — once an EvalSuite exists — a passing eval run). See
+``_check_production_gates``. Set ``EVAL_GATE_REQUIRE_SUITE_MIN_TIER`` to also
+require that high-risk-tier agents have an active suite before promotion.
 """
 import re
 import uuid
 from datetime import timedelta
 
+from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from controlplane.models import Agent, AgentVersion, Approval, AuditLog, BusinessUnit, EvalSuite, GovernanceReview
@@ -248,23 +252,27 @@ class GovernanceService:
         is_forced = bypass and to_status == Agent.Status.PRODUCTION
         action = "agent.transition.forced" if is_forced else "agent.transition"
 
-        # Perform the write via transition_to (handles deployed_at + snapshot).
-        agent.transition_to(to_status, bypass_governance=bypass)
+        # The state change and its audit record must commit together: a failed
+        # audit write must roll back the transition, never leave a governed
+        # status change with no ledger entry.
+        with transaction.atomic():
+            # Perform the write via transition_to (handles deployed_at + snapshot).
+            agent.transition_to(to_status, bypass_governance=bypass)
 
-        _audit(
-            actor=actor.username,
-            action=action,
-            resource_type="Agent",
-            resource_id=agent.id,
-            payload={
-                "from_status": from_status,
-                "to_status": to_status,
-                "reason": reason,
-                **({"FORCED": True} if is_forced else {}),
-            },
-            source=source,
-            ip=ip,
-        )
+            _audit(
+                actor=actor.username,
+                action=action,
+                resource_type="Agent",
+                resource_id=agent.id,
+                payload={
+                    "from_status": from_status,
+                    "to_status": to_status,
+                    "reason": reason,
+                    **({"FORCED": True} if is_forced else {}),
+                },
+                source=source,
+                ip=ip,
+            )
 
     # ── Retire ──────────────────────────────────────────────────────────────
 
@@ -336,6 +344,19 @@ class GovernanceService:
 
         # Gate 3 — Eval suite (mandatory once a suite exists)
         active_suite = EvalSuite.objects.filter(agent=agent, is_active=True).first()
+
+        # Optional: high-risk-tier agents must HAVE an active suite before
+        # promotion (closes the "no suite ⇒ gate skipped" gap). Off by default
+        # (min tier 0) to preserve existing behaviour; set the min tier in prod.
+        require_min_tier = int(getattr(settings, "EVAL_GATE_REQUIRE_SUITE_MIN_TIER", 0))
+        if require_min_tier and int(getattr(agent, "risk_tier", 1)) >= require_min_tier:
+            if active_suite is None:
+                raise TransitionError(
+                    f"Cannot promote '{agent.name}' (risk tier {agent.risk_tier}) to "
+                    "production: an active EvalSuite with a passing run is required for "
+                    f"tier ≥ {require_min_tier} agents."
+                )
+
         if active_suite is not None:
             has_passing_run = active_suite.runs.filter(passed=True).exists()
             if not has_passing_run:
