@@ -61,6 +61,9 @@ urlpatterns = [
     # Phase 3: Scanners (auto-discovery)
     path("scanners/",                                  views.scanners_list,           name="api_scanners_list"),
     path("scanners/<str:platform>/scan/",              views.scanner_scan,            name="api_scanner_scan"),
+    # Phase 4: Broker (intent → agent routing)
+    path("broker/route/",                              views.broker_route,            name="api_broker_route"),
+    path("broker/execute/",                            views.broker_execute,          name="api_broker_execute"),
     # D1: Prometheus metrics
     path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
     # D2: OTel spans

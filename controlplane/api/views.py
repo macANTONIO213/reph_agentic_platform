@@ -1336,6 +1336,48 @@ def registry_approve(request, entry_id):
     return JsonResponse({"id": str(entry.id), "review_status": status})
 
 
+# ── Phase 4: Broker (intent → agent routing) ───────────────────────────────────
+
+@login_required
+@require_POST
+def broker_route(request):
+    """POST /api/v1/broker/route — routing decision + ranked candidates (no execution)."""
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    intent = (body.get("intent") or "").strip()
+    if not intent:
+        return JsonResponse({"error": "intent is required."}, status=400)
+    from controlplane.services.interop import broker
+    return JsonResponse(broker.route(intent, domain=(body.get("domain") or "").strip()))
+
+
+@login_required
+@require_POST
+def broker_execute(request):
+    """
+    POST /api/v1/broker/execute — route to the best first-party agent and run it
+    through the governed runtime. Returns the routing decision + resulting task.
+    """
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    intent = (body.get("intent") or "").strip()
+    if not intent:
+        return JsonResponse({"error": "intent is required."}, status=400)
+    from controlplane.services.interop import broker
+    result = broker.route_and_execute(
+        intent, domain=(body.get("domain") or "").strip(),
+        submitted_by=f"broker:{request.user.username}",
+    )
+    return JsonResponse(result, status=200 if result.get("routed") else 404)
+
+
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────
 
 @login_required
