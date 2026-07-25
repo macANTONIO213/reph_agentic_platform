@@ -1309,6 +1309,18 @@ def scanner_scan(request, platform):
 
 @login_required
 @require_POST
+def scanner_scan_all(request):
+    """POST /api/v1/scanners/scan-all/ — run every registered scanner (partial-tolerant)."""
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.services.scanners import service as scanner_service
+    result = scanner_service.run_all_scans(by=request.user.username)
+    return JsonResponse({"status": "scanned", **result})
+
+
+@login_required
+@require_POST
 def registry_approve(request, entry_id):
     """
     POST /api/v1/registry/<id>/approve/ — approve/reject a discovered catalog entry.

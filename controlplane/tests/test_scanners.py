@@ -17,6 +17,7 @@ from controlplane.services.interop import federation
 from controlplane.services.scanners import service as scanner_service
 from controlplane.services.scanners.agentforce import AgentforceScanner
 from controlplane.services.scanners.bedrock import BedrockScanner
+from controlplane.services.scanners.copilot import CopilotScanner
 from controlplane.services.scanners.vertex import VertexScanner
 
 
@@ -50,6 +51,13 @@ AGENTFORCE_AGENTS = [
 ]
 
 
+COPILOT_BOTS = [
+    {"id": "BOT9", "name": "HR Copilot", "description": "en-US",
+     "topics": [{"name": "leave", "description": "leave requests"}]},
+    {"name": "no id — skipped"},
+]
+
+
 class _FakeVertex:
     def list_reasoning_engines(self):
         return {"reasoningEngines": VERTEX_ENGINES}
@@ -58,6 +66,11 @@ class _FakeVertex:
 class _FakeAgentforce:
     def list_agents(self):
         return {"agents": AGENTFORCE_AGENTS}
+
+
+class _FakeCopilot:
+    def list_agents(self):
+        return {"agents": COPILOT_BOTS}
 
 
 def _bu(name="Engineering"):
@@ -168,6 +181,32 @@ class AgentforceScannerTests(TestCase):
             AgentforceScanner().scan()
 
 
+class CopilotScannerTests(TestCase):
+    def test_scan_normalises(self):
+        agents = CopilotScanner(client=_FakeCopilot()).scan()
+        self.assertEqual(len(agents), 1)
+        a = agents[0]
+        self.assertEqual(a.external_id, "BOT9")
+        self.assertEqual(a.name, "HR Copilot")
+        self.assertEqual(a.platform, "copilot")
+        self.assertEqual([c["id"] for c in a.capabilities], ["leave"])
+
+    def test_run_scan_catalogs_discovered(self):
+        result = scanner_service.run_scan("copilot", client=_FakeCopilot())
+        self.assertEqual(result["discovered"], 1)
+        self.assertTrue(RegistryEntry.objects.filter(identifier="copilot:BOT9").exists())
+
+
+class ScanAllTests(TestCase):
+    def test_partial_tolerant_when_unconfigured(self):
+        # No injected clients / cloud creds → every platform errors, but the sweep
+        # completes and reports per-platform rather than raising.
+        result = scanner_service.run_all_scans()
+        self.assertEqual(result["total_discovered"], 0)
+        self.assertEqual(len(result["results"]), len(scanner_service.available_platforms()))
+        self.assertTrue(all("error" in r for r in result["results"]))
+
+
 # ── API ──────────────────────────────────────────────────────────────────────────
 
 class ScannerApiTests(TestCase):
@@ -181,9 +220,21 @@ class ScannerApiTests(TestCase):
         self.client.force_login(self.viewer)
         resp = self.client.get("/api/v1/scanners/")
         platforms = resp.json()["platforms"]
-        self.assertIn("bedrock", platforms)
-        self.assertIn("vertex", platforms)
-        self.assertIn("agentforce", platforms)
+        for p in ("bedrock", "vertex", "agentforce", "copilot"):
+            self.assertIn(p, platforms)
+
+    def test_scan_all_requires_admin(self):
+        self.client.force_login(self.approver)
+        self.assertEqual(self.client.post("/api/v1/scanners/scan-all/").status_code, 403)
+
+    def test_admin_scan_all(self):
+        self.client.force_login(self.admin)
+        resp = self.client.post("/api/v1/scanners/scan-all/")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "scanned")
+        self.assertIn("results", body)
+        self.assertIn("total_discovered", body)
 
     def test_scan_requires_admin(self):
         self.client.force_login(self.approver)

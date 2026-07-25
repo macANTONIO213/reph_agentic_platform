@@ -1959,11 +1959,24 @@
           const data=await jget('/api/v1/scanners/');
           const plats=data.platforms||[];
           bar.innerHTML=plats.length
-            ? plats.map(p=>`<button class="button secondary small fab-scan" data-plat="${esc(p)}" type="button">Scan ${esc(p)}</button>`).join('')
+            ? `<button class="button primary small fab-scanall" type="button">⟲ Scan all</button>`
+              +plats.map(p=>`<button class="button secondary small fab-scan" data-plat="${esc(p)}" type="button">Scan ${esc(p)}</button>`).join('')
             : '<span class="loading-cell">No scanners configured.</span>';
           bar.querySelectorAll('.fab-scan').forEach(b=>b.addEventListener('click',()=>runScan(b.dataset.plat,b)));
+          const allBtn=bar.querySelector('.fab-scanall');
+          if(allBtn)allBtn.addEventListener('click',()=>runScanAll(allBtn));
         }catch(err){bar.innerHTML='<span class="loading-cell">Failed to load scanners.</span>';toast(err.message,true);}
         loadDiscovered();
+      }
+      async function runScanAll(btn){
+        btn.disabled=true;const old=btn.textContent;btn.textContent='Scanning all…';
+        try{
+          const r=await jpost('/api/v1/scanners/scan-all/');
+          const ok=(r.results||[]).filter(x=>x.discovered!=null).length, skipped=(r.results||[]).filter(x=>x.error).length;
+          toast(`Scanned all: ${r.total_discovered} discovered · ${ok} ok, ${skipped} skipped`);
+          loadDiscovered();
+        }catch(err){toast(err.message,true);}
+        finally{btn.disabled=false;btn.textContent=old;}
       }
       async function runScan(plat,btn){
         btn.disabled=true;const old=btn.textContent;btn.textContent='Scanning…';

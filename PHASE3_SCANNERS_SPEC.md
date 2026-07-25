@@ -49,10 +49,12 @@ scanned entries start `discovered`. Discovery search defaults to `approved` only
 
 1. ✅ `review_status` + scanner framework + Bedrock scanner + catalog + scan/approve API +
    command. *(done)*
-2. ✅ Additional platform scanners — **Vertex** (Reasoning/Agent Engine, `vertex.py`) and
-   **Agentforce** (Salesforce Bot/Agentforce via REST, SSRF-guarded, `agentforce.py`), registered
-   in the scanner service. Same injectable-client, offline-testable shape as Bedrock. *(done)*
-   Copilot Studio + a "scan all configured platforms" runner remain as follow-ups.
+2. ✅ Additional platform scanners — **Vertex** (Reasoning/Agent Engine, `vertex.py`),
+   **Agentforce** (Salesforce Bot via REST, SSRF-guarded, `agentforce.py`) and **Copilot Studio**
+   (Power Platform / Dataverse bots, SSRF-guarded, `copilot.py`), all registered in the scanner
+   service. Same injectable-client, offline-testable shape as Bedrock. Plus a **scan-all runner**
+   (`run_all_scans`, `POST /scanners/scan-all/`, `run_scanner all`, and a "Scan all" button in the
+   operator UI) that is partial-tolerant — one unconfigured platform never aborts the sweep. *(done)*
 
 **Optional deps:** Vertex uses `google-api-python-client` and Agentforce a Salesforce access
 token — both lazy-loaded; absent config surfaces a clear `ScannerError`, never a crash.
