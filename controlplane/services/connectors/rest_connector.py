@@ -21,9 +21,14 @@ Usage::
 """
 import logging
 import urllib.parse
+from datetime import timedelta
 
 import urllib.request
 import json
+
+from django.conf import settings
+from django.core.cache import cache
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +61,21 @@ class RestConnector:
             raise RestConnectorError(
                 f"Connector '{self.connector.name}' has no 'base_url' in config."
             )
+        self._validate_destination(self._base_url)
         url = self._base_url + "/" + path.lstrip("/")
         if params:
             url += "?" + urllib.parse.urlencode(params)
+        self._validate_destination(url)
         return url
 
+    @staticmethod
+    def _validate_destination(url: str) -> None:
+        # Shared SSRF policy (extracted to interop.net_guard in Phase 1).
+        from controlplane.services.interop.net_guard import validate_destination
+        validate_destination(url, error_cls=RestConnectorError)
+
     def _request(self, method: str, url: str, body, actor: str) -> dict:
+        self._assert_circuit_closed()
         headers = {"Accept": "application/json", "User-Agent": "RELX-AgentPlatform/1.0"}
         if self._auth_header:
             # auth_header value like "Bearer {token}" or "ApiKey {key}"
@@ -83,11 +97,40 @@ class RestConnector:
                 except json.JSONDecodeError:
                     response_data = {"raw": raw.decode("utf-8", errors="replace")}
         except Exception as exc:
+            self._register_failure()
             self._audit(method, url, actor, success=False, error=str(exc))
             raise RestConnectorError(f"Request failed: {exc}") from exc
 
+        self._clear_failures()
         self._audit(method, url, actor, success=True, status_code=status_code)
         return {"status_code": status_code, "data": response_data}
+
+    def _failure_key(self) -> str:
+        return f"cb:rest:failures:{self.connector.id}"
+
+    def _open_until_key(self) -> str:
+        return f"cb:rest:open_until:{self.connector.id}"
+
+    def _assert_circuit_closed(self) -> None:
+        open_until = cache.get(self._open_until_key())
+        if open_until and timezone.now() < open_until:
+            raise RestConnectorError(
+                f"Circuit breaker open for connector '{self.connector.name}'. "
+                "Retry after cooldown."
+            )
+
+    def _register_failure(self) -> None:
+        threshold = int(getattr(settings, "CONNECTOR_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5))
+        cooldown = int(getattr(settings, "CONNECTOR_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 60))
+        key = self._failure_key()
+        failures = cache.get(key, 0) + 1
+        cache.set(key, failures, timeout=max(cooldown, 60))
+        if failures >= threshold:
+            cache.set(self._open_until_key(), timezone.now() + timedelta(seconds=cooldown), timeout=cooldown)
+
+    def _clear_failures(self) -> None:
+        cache.delete(self._failure_key())
+        cache.delete(self._open_until_key())
 
     def _audit(self, method: str, url: str, actor: str,
                success: bool, error: str = "", status_code: int = 0):

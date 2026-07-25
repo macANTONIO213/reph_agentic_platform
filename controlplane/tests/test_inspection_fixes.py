@@ -13,6 +13,7 @@ import json
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group, User
+from django.core.cache import cache
 from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
@@ -422,3 +423,27 @@ class OutputGuardrailRuntimeTests(TestCase):
         run = AgentRun.objects.filter(agent=a).latest("started_at")
         self.assertNotIn("123-45-6789", run.output_text)
         self.assertIn("withheld", run.output_text.lower())
+
+
+class ApiStabilizationMiddlewareTests(TestCase):
+
+    def setUp(self):
+        cache.clear()
+        self.user = _user("api-mw-user", staff=True)
+        self.client.force_login(self.user)
+        bu = _bu("MW-BU")
+        Workflow.objects.create(
+            name="MW WF", slug="mw-stab", status=Workflow.Status.ACTIVE, business_unit=bu
+        )
+
+    def test_api_version_headers_present(self):
+        resp = self.client.get("/api/v1/workflows/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["X-API-Version"], "v1")
+        self.assertIn("90-day notice", resp["X-API-Deprecation-Policy"])
+
+    @override_settings(API_RATE_LIMIT_REQUESTS_PER_WINDOW=2, API_RATE_LIMIT_WINDOW_SECONDS=60)
+    def test_global_api_rate_limit_blocks_excess(self):
+        self.assertEqual(self.client.get("/api/v1/workflows/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/workflows/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/workflows/").status_code, 429)

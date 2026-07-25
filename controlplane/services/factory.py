@@ -2,21 +2,29 @@
 Agent Factory Service — Phase F Blueprint Lifecycle
 
 Provides:
-  OpportunityScorer   — scores a ProcessInsight across four dimensions
-  BlueprintGenerator  — derives an AgentBlueprint from a ProcessInsight
-  BuildCompiler       — converts an approved AgentBlueprint into an Agent
+  OpportunityScorer      — scores a ProcessInsight across four dimensions
+  BlueprintGenerator     — derives an AgentBlueprint from a ProcessInsight (heuristics)
+  LLMBlueprintGenerator  — proposes the design with an LLM; deterministic fallback
+  BuildCompiler          — converts an approved AgentBlueprint into an Agent
 
 Usage::
     from controlplane.services.factory import blueprint_generator, build_compiler
 
     blueprint = blueprint_generator.generate(insight)
     agent = build_compiler.build(blueprint, built_by="user:alice")
+
+    # LLM-proposed design (falls back to heuristics when no API key / bad response):
+    from controlplane.services.factory import llm_blueprint_generator
+    blueprint = llm_blueprint_generator.generate(insight)
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
+
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -121,21 +129,38 @@ class BlueprintGenerator:
         Create and persist an AgentBlueprint from an insight.
         Returns the new AgentBlueprint instance.
         """
-        from controlplane.models import AgentBlueprint
-
         scores = self._scorer.score(insight)
         risk_level = self._derive_risk_level(scores["risk_score"])
+        design = self.derive_design(insight, risk_level)
+        return self._assemble(insight, design, scores, risk_level)
 
-        agent_name     = self._derive_name(insight)
-        mission        = self._derive_mission(insight)
-        trigger        = self._derive_trigger(insight)
-        inputs         = self._derive_inputs(insight)
-        outputs        = self._derive_outputs(insight)
-        tools          = self._derive_tools(insight)
-        workflow_steps = self._derive_workflow_steps(insight)
-        guardrails     = self._derive_guardrails(insight, risk_level)
-        approval_pts   = self._derive_approval_points(risk_level)
-        metrics        = self._derive_success_metrics(insight)
+    def derive_design(self, insight, risk_level: str) -> dict:
+        """
+        Produce the agent-design fields for a blueprint.
+
+        Returns a dict keyed exactly by the AgentBlueprint design fields so it can
+        be splatted straight into ``AgentBlueprint.objects.create``.  Subclasses
+        (e.g. :class:`LLMBlueprintGenerator`) override this to propose the design a
+        different way while reusing scoring, status, and persistence in
+        :meth:`_assemble`.
+        """
+        return {
+            "agent_name":            self._derive_name(insight),
+            "mission":               self._derive_mission(insight),
+            "trigger":               self._derive_trigger(insight),
+            "inputs":                self._derive_inputs(insight),
+            "outputs":               self._derive_outputs(insight),
+            "tools":                 self._derive_tools(insight),
+            "workflow_steps":        self._derive_workflow_steps(insight),
+            "guardrails":            self._derive_guardrails(insight, risk_level),
+            "human_approval_points": self._derive_approval_points(risk_level),
+            "success_metrics":       self._derive_success_metrics(insight),
+        }
+
+    def _assemble(self, insight, design: dict, scores: dict, risk_level: str) -> "AgentBlueprint":
+        """Persist a design dict as an AgentBlueprint, deriving status and version."""
+        from controlplane.models import AgentBlueprint
+
         missing_tools, missing_data = self._detect_missing(insight)
 
         # Determine initial status
@@ -155,26 +180,17 @@ class BlueprintGenerator:
         blueprint = AgentBlueprint.objects.create(
             insight               = insight,
             version               = version,
-            agent_name            = agent_name,
-            mission               = mission,
-            trigger               = trigger,
-            inputs                = inputs,
-            outputs               = outputs,
-            tools                 = tools,
-            workflow_steps        = workflow_steps,
-            guardrails            = guardrails,
-            human_approval_points = approval_pts,
-            success_metrics       = metrics,
             missing_tools         = missing_tools,
             missing_data          = missing_data,
             status                = status,
             risk_level            = risk_level,
+            **design,
             **scores,
         )
 
         logger.info(
             "Blueprint generated: '%s' (score=%.1f, status=%s)",
-            agent_name, scores["opportunity_score"], status,
+            design["agent_name"], scores["opportunity_score"], status,
         )
         return blueprint
 
@@ -309,6 +325,220 @@ class BlueprintGenerator:
         return "blocked"
 
 
+# ── LLM-driven blueprint generation ─────────────────────────────────────────────
+
+_LLM_SYSTEM_PROMPT = (
+    "You are a solutions architect for an enterprise agentic-automation platform. "
+    "Given a normalised process-intelligence finding, you design the blueprint for a "
+    "single AI agent that automates it. You propose the operating workflow, the tools "
+    "it needs, and the guardrails and human-approval gates that keep it safe.\n\n"
+    "Hard rules:\n"
+    "- Only propose tools from the provided catalogue. Never invent tool names.\n"
+    "- Every workflow step must be concrete and grounded in the finding.\n"
+    "- Prefer a human-approval gate before any irreversible or externally-visible action.\n"
+    "- Respond with a SINGLE JSON object and nothing else — no prose, no code fences."
+)
+
+# The design fields the LLM is asked to produce. Kept intentionally small: scoring,
+# risk, status, and versioning stay deterministic in the shared pipeline.
+_LLM_DESIGN_KEYS = (
+    "agent_name", "mission", "trigger", "inputs", "outputs",
+    "tools", "workflow_steps", "guardrails", "human_approval_points", "success_metrics",
+)
+
+
+class LLMBlueprintGenerator(BlueprintGenerator):
+    """
+    Blueprint generator that asks an LLM to propose the agent design.
+
+    Only the *design* (name, mission, workflow steps, tools, guardrails, …) is
+    LLM-generated; opportunity scoring, risk level, missing-requirement detection,
+    status, and versioning remain the deterministic logic inherited from
+    :class:`BlueprintGenerator`, so blueprints stay reproducible and auditable.
+
+    The LLM never blocks the pipeline: if no API key is configured, the SDK is
+    unavailable, or the response is malformed, generation falls back to the
+    deterministic derivation.  The result is always a valid, human-reviewable
+    blueprint left in DRAFT/NEEDS_* status behind the existing approval gate.
+    """
+
+    DEFAULT_MODEL = "claude-opus-4-8"
+
+    def __init__(self, model_id: str | None = None):
+        super().__init__()
+        self.model_id = model_id or self.DEFAULT_MODEL
+
+    def derive_design(self, insight, risk_level: str) -> dict:
+        base = super().derive_design(insight, risk_level)
+        raw = self._call_llm(insight)
+        if not raw:
+            logger.info(
+                "LLM blueprint generation unavailable for '%s'; using deterministic design.",
+                insight.process_name,
+            )
+            return base
+
+        data = self._parse_json(raw)
+        if not isinstance(data, dict):
+            logger.warning(
+                "LLM blueprint response for '%s' was not a JSON object; using deterministic design.",
+                insight.process_name,
+            )
+            return base
+
+        merged = self._merge_design(base, data)
+        logger.info(
+            "LLM blueprint proposal accepted for '%s' (%d workflow steps).",
+            insight.process_name, len(merged["workflow_steps"]),
+        )
+        return merged
+
+    # ── LLM call ────────────────────────────────────────────────────────────────
+
+    def _call_llm(self, insight) -> str | None:
+        """Return the raw model response text, or None if the LLM path is unavailable."""
+        api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return None
+        try:
+            import anthropic
+        except ImportError:
+            return None
+
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=self.model_id,
+                max_tokens=4096,
+                thinking={"type": "adaptive"},
+                system=_LLM_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": self._build_prompt(insight)}],
+            )
+            return self._response_text(response)
+        except Exception as exc:  # network, auth, rate-limit, SDK errors — never fatal
+            logger.warning("LLM blueprint generation failed for '%s': %s", insight.process_name, exc)
+            return None
+
+    def _build_prompt(self, insight) -> str:
+        systems = insight.systems_involved if isinstance(insight.systems_involved, list) else []
+        catalog = self._tool_catalog()
+        schema_hint = json.dumps({
+            "agent_name": "string",
+            "mission": "string",
+            "trigger": "string — what causes the agent to run",
+            "inputs":  [{"source": "string", "description": "string"}],
+            "outputs": [{"artifact": "string"}],
+            "tools":   [{"name": "one of the catalogue tools", "target": "system it connects to"}],
+            "workflow_steps": [
+                {"step": "short_name", "description": "string",
+                 "depends_on": ["earlier step_name(s), optional"]}
+            ],
+            "guardrails": [{"rule": "string", "description": "string"}],
+            "human_approval_points": [{"step": "step_name", "description": "string"}],
+            "success_metrics": [{"metric": "string", "target": "string"}],
+        }, indent=2)
+        return (
+            "Design an agent for the following process-intelligence finding.\n\n"
+            f"Process name: {insight.process_name}\n"
+            f"Finding type: {insight.finding_type}\n"
+            f"Summary: {insight.summary}\n"
+            f"Business impact: {insight.impact or 'not stated'}\n"
+            f"Frequency: {insight.frequency or 'not stated'}\n"
+            f"Systems involved: {', '.join(systems) if systems else 'not stated'}\n"
+            f"Recommended action: {insight.recommended_action or 'not stated'}\n"
+            f"Risk notes: {insight.risk_notes or 'none'}\n\n"
+            f"Available tool catalogue (choose tools ONLY from this list): {', '.join(catalog)}\n\n"
+            "Return a single JSON object with exactly these fields:\n"
+            f"{schema_hint}\n\n"
+            "Make workflow_steps specific to this process. Use depends_on to express "
+            "ordering; a linear pipeline can omit it."
+        )
+
+    @staticmethod
+    def _tool_catalog() -> list[str]:
+        names: set[str] = {"sql_connector", "rest_connector"}
+        try:
+            from controlplane.services.tools import tool_registry
+            names.update(tool_registry.names())
+        except Exception:  # registry import/order issues must not break generation
+            pass
+        return sorted(names)
+
+    @staticmethod
+    def _response_text(response) -> str:
+        parts = []
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "text" and getattr(block, "text", ""):
+                parts.append(block.text)
+        return "".join(parts)
+
+    # ── parsing & validation ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_json(raw: str):
+        """Extract and parse the JSON object from a model response; None on failure."""
+        if not raw:
+            return None
+        text = raw.strip()
+        # Tolerate accidental ```json fences or surrounding prose.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+        try:
+            return json.loads(text[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+
+    def _merge_design(self, base: dict, data: dict) -> dict:
+        """
+        Overlay validated LLM fields onto the deterministic design.
+
+        Any field the LLM omits or malforms keeps its deterministic value, so the
+        downstream pipeline (build, compile, execute) always receives a complete,
+        well-formed design.
+        """
+        design = dict(base)
+
+        for key in ("agent_name", "mission", "trigger"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                design[key] = value.strip()
+
+        for key in ("inputs", "outputs", "tools", "guardrails",
+                    "human_approval_points", "success_metrics"):
+            value = data.get(key)
+            if isinstance(value, list) and all(isinstance(i, dict) for i in value) and value:
+                design[key] = value
+
+        steps = self._coerce_steps(data.get("workflow_steps"))
+        if steps:
+            design["workflow_steps"] = steps
+
+        return design
+
+    @staticmethod
+    def _coerce_steps(value) -> list | None:
+        """Normalise LLM workflow steps into the {step, description, depends_on?} shape."""
+        if not isinstance(value, list):
+            return None
+        steps = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("step") or item.get("name") or "").strip()
+            if not name:
+                continue
+            entry = {"step": name, "description": str(item.get("description") or "").strip()}
+            deps = item.get("depends_on")
+            if isinstance(deps, list):
+                cleaned = [str(d).strip() for d in deps if str(d).strip()]
+                if cleaned:
+                    entry["depends_on"] = cleaned
+            steps.append(entry)
+        return steps or None
+
+
 class BuildCompiler:
     """
     Converts an approved AgentBlueprint into a runnable Agent.
@@ -404,6 +634,7 @@ class BuildCompiler:
 
 
 # Module-level singletons
-opportunity_scorer    = OpportunityScorer()
-blueprint_generator   = BlueprintGenerator()
-build_compiler        = BuildCompiler()
+opportunity_scorer      = OpportunityScorer()
+blueprint_generator     = BlueprintGenerator()
+llm_blueprint_generator = LLMBlueprintGenerator()
+build_compiler          = BuildCompiler()

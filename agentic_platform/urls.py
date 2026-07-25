@@ -5,5 +5,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("accounts/", include("django.contrib.auth.urls")),
     path("api/v1/", include("controlplane.api.urls")),
+    path("a2a/", include("controlplane.api.a2a_urls")),
     path("", include("controlplane.urls")),
 ]

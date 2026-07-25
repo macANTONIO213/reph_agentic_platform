@@ -15,6 +15,11 @@ urlpatterns = [
     path("org/tree/",                                views.org_tree,                name="api_org_tree"),
     # Feedback
     path("feedback/low-rated/",                      views.feedback_low_rated,      name="api_feedback_low_rated"),
+    # Platform engineering maturity
+    path("platform/health/",                         views.platform_health,          name="api_platform_health"),
+    path("platform/readiness/",                      views.platform_readiness,       name="api_platform_readiness"),
+    path("platform/maturity/",                       views.platform_maturity,        name="api_platform_maturity"),
+    path("platform/success-criteria/",               views.platform_success_criteria, name="api_platform_success_criteria"),
     # Governance decisions
     path("governance/<uuid:review_id>/decide/",        views.governance_decide,       name="api_governance_decide"),
     # Agent transitions
@@ -39,6 +44,14 @@ urlpatterns = [
     path("knowledge/ingest/",                          views.knowledge_ingest,        name="api_knowledge_ingest"),
     # C3: Data connectors
     path("connectors/",                                views.connectors_list,         name="api_connectors_list"),
+    # Phase 1: MCP interop (register / sync / bind)
+    path("mcp/servers/",                               views.mcp_servers,             name="api_mcp_servers"),
+    path("mcp/servers/<uuid:server_id>/",              views.mcp_server_detail,       name="api_mcp_server_detail"),
+    path("mcp/servers/<uuid:server_id>/sync/",         views.mcp_server_sync,         name="api_mcp_server_sync"),
+    path("agents/<uuid:agent_id>/mcp-bindings/",       views.agent_mcp_bindings,      name="api_agent_mcp_bindings"),
+    # Phase 1: A2A card preview / publish
+    path("agents/<uuid:agent_id>/a2a-card/",           views.agent_a2a_card_preview,  name="api_agent_a2a_card"),
+    path("agents/<uuid:agent_id>/a2a-card/publish/",   views.agent_a2a_card_publish,  name="api_agent_a2a_card_publish"),
     # D1: Prometheus metrics
     path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
     # D2: OTel spans
@@ -63,6 +76,8 @@ urlpatterns = [
     path("factory/blueprints/<uuid:blueprint_id>/",    views.factory_blueprint_detail,           name="api_factory_blueprint_detail"),
     path("factory/blueprints/<uuid:blueprint_id>/approve/", views.factory_blueprint_approve,     name="api_factory_blueprint_approve"),
     path("factory/blueprints/<uuid:blueprint_id>/build/",   views.factory_blueprint_build,       name="api_factory_blueprint_build"),
+    path("factory/blueprints/<uuid:blueprint_id>/build-workflow/", views.factory_blueprint_build_workflow, name="api_factory_blueprint_build_workflow"),
+    path("factory/agents/<uuid:agent_id>/tool-bindings/promote/", views.factory_tool_bindings_promote, name="api_factory_tool_bindings_promote"),
     path("factory/packages/",                          views.factory_packages_list,              name="api_factory_packages_list"),
     path("factory/packages/<uuid:package_id>/",        views.factory_package_detail,             name="api_factory_package_detail"),
 ]

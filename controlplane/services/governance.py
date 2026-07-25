@@ -156,6 +156,7 @@ class GovernanceService:
         source: str = "ui",
         ip: str | None = None,
     ) -> AgentVersion:
+        self._check_change_control_gates(agent, manifest)
         version = AgentVersion.objects.create(
             agent=agent,
             version=manifest.get("version", agent.version),
@@ -368,6 +369,51 @@ class GovernanceService:
     def _make_slug(name: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
         return slug[:50] if slug else f"agent-{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _check_change_control_gates(agent: Agent, manifest: dict) -> None:
+        """
+        Production change-control gate for high-impact version mutations.
+
+        For production agents, changes to model_id, tool_names, or system_prompt require:
+          1. A valid unconsumed Approval with scope in {"model_change", "production_change"}
+          2. A recent passing EvalRun (<= 30 days) on the active EvalSuite (if active suite exists)
+        """
+        if agent.status != Agent.Status.PRODUCTION:
+            return
+
+        new_model = manifest.get("model_id", agent.model_id)
+        new_tools = manifest.get("tool_names", agent.tool_names)
+        new_prompt = manifest.get("system_prompt", agent.system_prompt)
+        changed = (
+            new_model != agent.model_id
+            or list(new_tools or []) != list(agent.tool_names or [])
+            or str(new_prompt) != str(agent.system_prompt)
+        )
+        if not changed:
+            return
+
+        has_change_approval = agent.approvals.filter(
+            is_consumed=False,
+            expires_at__gt=timezone.now(),
+            scope__in=["model_change", "production_change"],
+        ).exists()
+        if not has_change_approval:
+            raise TransitionError(
+                f"Cannot version '{agent.name}' with production-impacting changes: "
+                "a valid unconsumed Approval with scope 'model_change' or 'production_change' is required."
+            )
+
+        active_suite = EvalSuite.objects.filter(agent=agent, is_active=True).first()
+        if active_suite is None:
+            return
+        cutoff = timezone.now() - timedelta(days=30)
+        has_recent_pass = active_suite.runs.filter(passed=True, executed_at__gte=cutoff).exists()
+        if not has_recent_pass:
+            raise TransitionError(
+                f"Cannot version '{agent.name}' with production-impacting changes: "
+                "active EvalSuite requires a passing run in the last 30 days."
+            )
 
 
 # Module-level singleton — import and call directly.

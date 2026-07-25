@@ -15,16 +15,27 @@ from .models import (
     Agent, AgentFeedback, AgentRun, Approval, AuditLog, BusinessUnit,
     ConversationSession, Division, GovernanceReview, OrgProcess, TelemetryEvent, WorkStream,
 )
+from .security import is_cross_tenant as _is_cross_tenant, user_business_unit_id as _user_business_unit_id
 from .services.agent_runtime import PlatformAgentRuntime
 
 
 @login_required
 @ensure_csrf_cookie
 def dashboard(request):
-    agents = Agent.objects.all().prefetch_related("runs")
+    agents = Agent.objects.all().prefetch_related("runs").annotate(
+        source_blueprint_count=Count("source_blueprints", distinct=True)
+    )
+    if not _is_cross_tenant(request.user):
+        agents = agents.filter(org_unit_id=_user_business_unit_id(request.user))
     live_agent = Agent.objects.filter(slug="agent-deployment-advisor").first()
+    if live_agent is not None and not _is_cross_tenant(request.user):
+        if str(live_agent.org_unit_id or "") != str(_user_business_unit_id(request.user) or ""):
+            live_agent = None
     runs = AgentRun.objects.select_related("agent").order_by("-started_at")[:8]
     events = TelemetryEvent.objects.select_related("agent").order_by("-created_at")[:10]
+    if not _is_cross_tenant(request.user):
+        runs = runs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+        events = events.filter(agent__org_unit_id=_user_business_unit_id(request.user))
 
     totals = agents.aggregate(
         total_mau=Sum("monthly_active_users"),
@@ -40,11 +51,19 @@ def dashboard(request):
         for item in agents.values("risk_tier").annotate(count=Count("id")).order_by("risk_tier")
     }
 
-    pending_reviews = GovernanceReview.objects.filter(status=GovernanceReview.Status.PENDING).count()
+    pending_reviews = GovernanceReview.objects.filter(status=GovernanceReview.Status.PENDING)
+    if not _is_cross_tenant(request.user):
+        pending_reviews = pending_reviews.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+    pending_reviews = pending_reviews.count()
     business_units = BusinessUnit.objects.filter(is_active=True)
+    if not _is_cross_tenant(request.user):
+        business_units = business_units.filter(id=_user_business_unit_id(request.user))
 
     # Monitoring stats from the last 20 runs
-    recent_runs = list(AgentRun.objects.order_by("-started_at")[:20])
+    recent_runs_qs = AgentRun.objects.order_by("-started_at")
+    if not _is_cross_tenant(request.user):
+        recent_runs_qs = recent_runs_qs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+    recent_runs = list(recent_runs_qs[:20])
     latencies = sorted(r.latency_ms for r in recent_runs if r.latency_ms > 0)
     monitoring = {
         "p50_ms": latencies[len(latencies) // 2] if latencies else 0,
@@ -199,7 +218,10 @@ def _resolve_session(
 @login_required
 @require_GET
 def telemetry_feed(request):
-    events = TelemetryEvent.objects.select_related("agent").order_by("-created_at")[:15]
+    events = TelemetryEvent.objects.select_related("agent").order_by("-created_at")
+    if not _is_cross_tenant(request.user):
+        events = events.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+    events = events[:15]
     data = [
         {
             "event_type": event.event_type,
@@ -284,7 +306,10 @@ def org_children(request):
 @login_required
 @require_GET
 def monitoring_data(request):
-    recent_runs = list(AgentRun.objects.order_by("-started_at")[:20])
+    recent_runs_qs = AgentRun.objects.order_by("-started_at")
+    if not _is_cross_tenant(request.user):
+        recent_runs_qs = recent_runs_qs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+    recent_runs = list(recent_runs_qs[:20])
     latencies = sorted(r.latency_ms for r in recent_runs if r.latency_ms > 0)
     p50 = latencies[len(latencies) // 2] if latencies else 0
     p99 = latencies[max(0, int(len(latencies) * 0.99) - 1)] if latencies else 0

@@ -166,10 +166,11 @@ def latency_timeseries(window: str = "30d", bucket: str = "day", **filters) -> l
     ]
 
 
-def runs_by_platform(window: str = "30d") -> list[dict]:
+def runs_by_platform(window: str = "30d", **filters) -> list[dict]:
     since = _since(window)
+    qs = _apply_filters(AgentRun.objects.filter(started_at__gte=since), filters)
     rows = (
-        AgentRun.objects.filter(started_at__gte=since)
+        qs
         .values("agent__platform")
         .annotate(count=Count("id"), cost=Sum("cost_usd"))
         .order_by("-count")
@@ -180,10 +181,11 @@ def runs_by_platform(window: str = "30d") -> list[dict]:
     ]
 
 
-def runs_by_agent(window: str = "30d") -> list[dict]:
+def runs_by_agent(window: str = "30d", **filters) -> list[dict]:
     since = _since(window)
+    qs = _apply_filters(AgentRun.objects.filter(started_at__gte=since), filters)
     rows = (
-        AgentRun.objects.filter(started_at__gte=since)
+        qs
         .values("agent__id", "agent__name")
         .annotate(
             count=Count("id"),
@@ -216,13 +218,22 @@ def rating_distribution(window: str = "30d", **filters) -> list[dict]:
     return [{"rating": i, "count": dist.get(i, 0)} for i in range(1, 6)]
 
 
-def low_rated_runs(window: str = "30d", threshold: int = 2) -> list[dict]:
+def low_rated_runs(window: str = "30d", threshold: int = 2, **filters) -> list[dict]:
     since = _since(window)
-    feedbacks = (
-        AgentFeedback.objects.filter(created_at__gte=since, rating__lte=threshold)
-        .select_related("run__agent")
-        .order_by("-created_at")[:50]
-    )
+    feedback_qs = AgentFeedback.objects.filter(created_at__gte=since, rating__lte=threshold)
+    if filters.get("agent_id"):
+        feedback_qs = feedback_qs.filter(run__agent_id=filters["agent_id"])
+    if filters.get("business_unit_id"):
+        feedback_qs = feedback_qs.filter(run__agent__org_unit_id=filters["business_unit_id"])
+    if filters.get("division_id"):
+        feedback_qs = feedback_qs.filter(run__agent__org_division_id=filters["division_id"])
+    if filters.get("work_stream_id"):
+        feedback_qs = feedback_qs.filter(run__agent__org_work_stream_id=filters["work_stream_id"])
+    if filters.get("process_id"):
+        feedback_qs = feedback_qs.filter(run__agent__org_process_id=filters["process_id"])
+    if filters.get("platform"):
+        feedback_qs = feedback_qs.filter(run__agent__platform=filters["platform"])
+    feedbacks = feedback_qs.select_related("run__agent").order_by("-created_at")[:50]
     return [
         {
             "run_id": str(f.run_id),

@@ -56,6 +56,9 @@ def _schema_for(binding) -> dict:
 def _describe(binding) -> str:
     if binding.description:
         return binding.description
+    if binding.mcp_server_id:
+        server = binding.mcp_server.name if binding.mcp_server else "an MCP server"
+        return f"Call the '{binding.mcp_tool_name}' tool on {server}."
     target = binding.connector.name if binding.connector_id else "an unbound system"
     return f"Query {target} via the '{binding.tool_name}' binding."
 
@@ -121,6 +124,61 @@ def build_connector_spec(binding) -> ToolSpec:
     )
 
 
+# ── MCP-backed tool schemas / execution (Phase 1 interop) ──────────────────────
+
+def _mcp_input_schema(binding) -> dict:
+    """Input schema for an MCP tool, from the server's cached catalog."""
+    if binding.mcp_server_id:
+        schema = binding.mcp_server.tool_schema(binding.mcp_tool_name)
+        if schema:
+            return schema
+    return {"type": "object"}
+
+
+def _dry_run_mcp(binding, inp: dict) -> dict:
+    """Sandbox execution for an MCP tool — validate inputs, NEVER call out."""
+    schema = _mcp_input_schema(binding)
+    required = schema.get("required", []) if isinstance(schema, dict) else []
+    missing = [k for k in required if not (inp or {}).get(k)]
+    return {
+        "mode": "sandbox",
+        "tool": binding.tool_name,
+        "mcp_server": binding.mcp_server.name if binding.mcp_server_id else None,
+        "mcp_tool": binding.mcp_tool_name,
+        "would_execute": inp,
+        "input_valid": not missing,
+        "missing_inputs": missing,
+        "note": "Sandbox dry-run: no MCP call was made.",
+    }
+
+
+def build_mcp_spec(binding) -> ToolSpec:
+    """Build a ToolSpec for an MCP-backed binding, honouring its effective mode."""
+
+    def handler(inp: dict, ctx: ToolContext) -> dict:
+        mode = binding.effective_mode(getattr(ctx, "mode", "live"))
+        if mode == "live":
+            from controlplane.services.interop import mcp_client
+            actor = getattr(ctx, "actor", "agent")
+            try:
+                return mcp_client.call_tool(
+                    binding.mcp_server, binding.mcp_tool_name, inp, actor=actor,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface as tool error, never crash run
+                logger.warning("Live MCP binding '%s' failed: %s", binding.tool_name, exc)
+                return {"error": f"MCP call failed: {exc}"}
+        return _dry_run_mcp(binding, inp)
+
+    return ToolSpec(
+        name=binding.tool_name,
+        description=_describe(binding),
+        input_schema=_mcp_input_schema(binding),
+        handler=handler,
+        risk_tier=getattr(binding.agent, "risk_tier", 1),
+        requires_binding=True,
+    )
+
+
 # ── resolution ────────────────────────────────────────────────────────────────
 
 def resolve_bindings(agent) -> dict:
@@ -129,8 +187,15 @@ def resolve_bindings(agent) -> dict:
     qs = (AgentToolBinding.objects
           .filter(agent=agent)
           .exclude(binding_status=AgentToolBinding.Status.PROPOSED)
-          .select_related("connector"))
+          .select_related("connector", "mcp_server"))
     return {b.tool_name: b for b in qs}
+
+
+def _spec_for_binding(binding) -> ToolSpec:
+    """Pick the right ToolSpec builder for a binding's target kind."""
+    if binding.mcp_server_id is not None:
+        return build_mcp_spec(binding)
+    return build_connector_spec(binding)
 
 
 def toolset_for(agent, mode: str = "live") -> tuple[dict, dict]:
@@ -145,7 +210,7 @@ def toolset_for(agent, mode: str = "live") -> tuple[dict, dict]:
     dispatch time via ``binding.effective_mode(ctx.mode)``.
     """
     bindings = resolve_bindings(agent)
-    extra_specs = {name: build_connector_spec(b) for name, b in bindings.items()}
+    extra_specs = {name: _spec_for_binding(b) for name, b in bindings.items()}
     return extra_specs, bindings
 
 
@@ -239,14 +304,57 @@ def create_bindings_from_plan(agent, plan, *, created_by: str = "factory", attac
     return bindings
 
 
+def create_mcp_binding(agent, server, mcp_tool_name: str, *, tool_name: str | None = None,
+                       created_by: str = "api"):
+    """
+    Bind one MCP tool (on ``server``) to ``agent`` — Phase 1 interop.
+
+    Safety mirrors connector bindings: created as SANDBOX when the server is
+    usable (active + catalog cached), otherwise PROPOSED.  NEVER live — going live
+    is the explicit, approval-gated ``promote_to_live``.  Idempotent by
+    (agent, tool_name).
+    """
+    from controlplane.models import AgentToolBinding
+
+    tname = _slug_tool_name(tool_name or mcp_tool_name)
+    status = (
+        AgentToolBinding.Status.SANDBOX if getattr(server, "is_usable", False)
+        else AgentToolBinding.Status.PROPOSED
+    )
+    binding, _ = AgentToolBinding.objects.update_or_create(
+        agent=agent,
+        tool_name=tname,
+        defaults={
+            "connector":      None,        # MCP target — mutually exclusive with connector
+            "mcp_server":     server,
+            "mcp_tool_name":  mcp_tool_name,
+            "binding_status": status,
+            "operation":      "call",
+            "config": {"mcp_tool": mcp_tool_name, "server": server.name},
+            "created_by":     created_by,
+        },
+    )
+    return binding
+
+
 # ── lifecycle ─────────────────────────────────────────────────────────────────
 
 def promote_to_sandbox(binding, *, by: str = "system"):
     """Make a proposed binding executable as a dry-run (no approval required)."""
-    from controlplane.models import AgentToolBinding
+    from controlplane.models import AgentToolBinding, AuditLog
     binding.binding_status = AgentToolBinding.Status.SANDBOX
     binding.created_by = binding.created_by or by
     binding.save(update_fields=["binding_status", "created_by", "updated_at"])
+    AuditLog.objects.create(
+        actor=by,
+        action="tool_binding_promoted_sandbox",
+        resource_type="AgentToolBinding",
+        resource_id=str(binding.id),
+        payload={
+            "agent_id": str(binding.agent_id),
+            "tool_name": binding.tool_name,
+        },
+    )
     return binding
 
 
@@ -261,10 +369,18 @@ def promote_to_live(binding, *, approver, package=None):
     """
     from controlplane.models import AgentToolBinding, AuditLog
 
-    if binding.connector_id is None:
-        raise ValueError("Cannot go live: no DataConnector attached to this binding.")
+    if binding.target_kind == "none":
+        raise ValueError("Cannot go live: no connector or MCP server attached to this binding.")
     if approver is None:
         raise ValueError("Cannot go live: an approver is required.")
+    if getattr(binding.agent, "status", None) not in {"pilot", "production"}:
+        raise ValueError("Cannot go live: the owning agent must be at least pilot status.")
+    if binding.mcp_server_id is not None:
+        server = binding.mcp_server
+        if not (server and server.is_active and server.status == server.Status.ACTIVE):
+            raise ValueError(
+                "Cannot go live: the MCP server is not active (sync its catalog first)."
+            )
     if package is not None and not package.can_bind_production_tools:
         raise ValueError(
             "Cannot go live: the source package's safety_boundary forbids "

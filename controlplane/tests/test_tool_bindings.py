@@ -214,6 +214,11 @@ class PromotionTests(TestCase):
         with self.assertRaises(ValueError):
             promote_to_live(b, approver=None)
 
+    def test_promote_to_live_requires_pilot_or_production_agent(self):
+        b = _binding(_agent(status=Agent.Status.DRAFT), _sql_connector())
+        with self.assertRaises(ValueError):
+            promote_to_live(b, approver=self.user)
+
     def test_promote_to_live_respects_package_boundary(self):
         agent = _agent()
         pkg = AgentFactoryPackage.objects.create(

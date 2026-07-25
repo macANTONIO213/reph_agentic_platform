@@ -27,6 +27,7 @@ from controlplane.models import (
     EvalSuite,
     ProcessInsight,
     TelemetryEvent,
+    Workflow,
 )
 from controlplane.services.factory import (
     BlueprintGenerator,
@@ -447,6 +448,13 @@ class FactoryInsightAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["summary"], "Updated via PATCH")
 
+    def test_delete_insight(self):
+        insight = _make_insight(source_reference="PI-DEL-001")
+        resp = self.client.delete(f"/api/v1/factory/insights/{insight.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["deleted"])
+        self.assertFalse(ProcessInsight.objects.filter(id=insight.id).exists())
+
     def test_insight_not_found_returns_404(self):
         resp = self.client.get(f"/api/v1/factory/insights/{uuid.uuid4()}/")
         self.assertEqual(resp.status_code, 404)
@@ -536,6 +544,62 @@ class FactoryBlueprintAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_delete_blueprint(self):
+        bp = _make_blueprint()
+        resp = self.client.delete(f"/api/v1/factory/blueprints/{bp.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["deleted"])
+        self.assertFalse(AgentBlueprint.objects.filter(id=bp.id).exists())
+
+    def test_delete_blueprint_also_deletes_orphan_draft_built_agent(self):
+        bp = self._make_approved_bp()
+        built = build_compiler.build(bp, built_by="builder")
+        resp = self.client.delete(f"/api/v1/factory/blueprints/{bp.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["deleted"])
+        self.assertEqual(resp.json()["deleted_agent_id"], str(built.id))
+        self.assertFalse(AgentBlueprint.objects.filter(id=bp.id).exists())
+        self.assertFalse(Agent.objects.filter(id=built.id).exists())
+
+    def test_delete_orphan_draft_agent_from_catalog(self):
+        agent = Agent.objects.create(
+            slug=f"orphan-{uuid.uuid4().hex[:8]}",
+            name="Orphan Draft Agent",
+            kind=Agent.Kind.CUSTOM,
+            integration_mode=Agent.IntegrationMode.SDK,
+            platform=Agent.Platform.DJANGO,
+            business_unit="Finance",
+            owner="admin",
+            technical_owner="admin",
+            purpose="Temporary draft",
+            system_prompt="System prompt",
+            status=Agent.Status.DRAFT,
+            risk_tier=1,
+        )
+        resp = self.client.delete(f"/api/v1/agents/{agent.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["deleted"])
+        self.assertFalse(Agent.objects.filter(id=agent.id).exists())
+
+    def test_delete_non_draft_agent_from_catalog_rejected(self):
+        agent = Agent.objects.create(
+            slug=f"review-{uuid.uuid4().hex[:8]}",
+            name="Review Agent",
+            kind=Agent.Kind.CUSTOM,
+            integration_mode=Agent.IntegrationMode.SDK,
+            platform=Agent.Platform.DJANGO,
+            business_unit="Finance",
+            owner="admin",
+            technical_owner="admin",
+            purpose="Not draft",
+            system_prompt="System prompt",
+            status=Agent.Status.REVIEW,
+            risk_tier=1,
+        )
+        resp = self.client.delete(f"/api/v1/agents/{agent.id}/")
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(Agent.objects.filter(id=agent.id).exists())
+
     def test_patch_clears_missing_requirements_updates_status(self):
         insight = _make_insight(systems_involved=["SAP"])
         bp = blueprint_generator.generate(insight)
@@ -590,6 +654,29 @@ class FactoryBlueprintAPITests(TestCase):
         agent_id = data["agent"]["id"]
         self.assertTrue(Agent.objects.filter(id=agent_id).exists())
 
+    def test_build_workflow_from_built_blueprint(self):
+        bp = self._make_approved_bp()
+        build_compiler.build(bp, built_by="builder")
+        resp = self.client.post(
+            f"/api/v1/factory/blueprints/{bp.id}/build-workflow/",
+            data=json.dumps({"run": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["blueprint"]["id"], str(bp.id))
+        self.assertEqual(data["workflow"]["status"], Workflow.Status.DRAFT)
+        self.assertGreater(data["workflow"]["task_count"], 0)
+
+    def test_build_workflow_requires_built_blueprint(self):
+        bp = self._make_approved_bp()
+        resp = self.client.post(
+            f"/api/v1/factory/blueprints/{bp.id}/build-workflow/",
+            data=json.dumps({"run": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
     def test_build_non_approved_returns_400(self):
         insight = _make_insight(systems_involved=["rest-api"])
         bp = blueprint_generator.generate(insight)
@@ -640,6 +727,40 @@ class FactoryBlueprintAPITests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()["blueprint"]["status"], "built")
         self.assertIsNotNone(resp.json()["agent"]["id"])
+
+    def test_promote_tool_bindings_to_sandbox(self):
+        bp = self._make_approved_bp()
+        agent = build_compiler.build(bp, built_by="builder")
+        resp = self.client.post(
+            f"/api/v1/factory/agents/{agent.id}/tool-bindings/promote/",
+            data=json.dumps({"mode": "sandbox"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        statuses = {b["binding_status"] for b in resp.json()["bindings"]}
+        self.assertEqual(statuses, {"sandbox"})
+
+    def test_viewer_cannot_approve_blueprint(self):
+        viewer = User.objects.create_user(username="viewer")
+        viewer.profile.role = "viewer"
+        viewer.profile.business_unit = BusinessUnit.objects.create(name="Viewer BU", code="viewer-bu")
+        viewer.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(viewer)
+        bp = self._make_approved_bp()
+        bp.status = AgentBlueprint.Status.DRAFT
+        bp.save(update_fields=["status"])
+        resp = self.client.post(f"/api/v1/factory/blueprints/{bp.id}/approve/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_viewer_cannot_build_blueprint(self):
+        viewer = User.objects.create_user(username="viewer2")
+        viewer.profile.role = "viewer"
+        viewer.profile.business_unit = BusinessUnit.objects.create(name="Viewer BU 2", code="viewer-bu-2")
+        viewer.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(viewer)
+        bp = self._make_approved_bp()
+        resp = self.client.post(f"/api/v1/factory/blueprints/{bp.id}/build/")
+        self.assertEqual(resp.status_code, 403)
 
 
 # ── Agent Factory Package ingestion ───────────────────────────────────────────
@@ -758,6 +879,16 @@ class PackageIngestorServiceTests(TestCase):
         pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
         self.assertEqual(pkg.risk_tier, 2)
         self.assertEqual(pkg.sandbox_agent.risk_tier, 2)
+
+    def test_imported_blueprint_scores_are_populated(self):
+        pkg = package_ingestor.ingest(_make_package(package_id="AFP-2026-SCORE-1"), ingested_by="alice")
+        bp = pkg.blueprint
+        self.assertIsNotNone(bp)
+        self.assertGreater(bp.business_value_score, 0)
+        self.assertGreater(bp.automation_fit_score, 0)
+        self.assertGreater(bp.complexity_score, 0)
+        self.assertGreater(bp.risk_score, 0)
+        self.assertGreater(bp.opportunity_score, 0)
 
     def test_eval_cases_generated(self):
         pkg = package_ingestor.ingest(_make_package(), ingested_by="alice")
@@ -888,7 +1019,163 @@ class PackageIngestAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["id"], pkg_id)
 
+    def test_generate_blueprint_from_package_ingested_insight(self):
+        pkg_data = self._post(_make_package(package_id="AFP-2026-GEN-PI-1")).json()
+        insight_id = pkg_data["insight_id"]
+        resp = self.client.post(f"/api/v1/factory/insights/{insight_id}/generate-blueprint/")
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["insight_id"], insight_id)
+        self.assertIn(data["status"], {"draft", "needs_data", "needs_tool"})
+
+    def test_delete_package(self):
+        pkg_id = self._post(_make_package(package_id="AFP-2026-DEL-1")).json()["id"]
+        resp = self.client.delete(f"/api/v1/factory/packages/{pkg_id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["deleted"])
+        self.assertFalse(AgentFactoryPackage.objects.filter(id=pkg_id).exists())
+
     def test_requires_login(self):
         self.client.logout()
         resp = self._post(_make_package())
         self.assertIn(resp.status_code, (302, 403))
+
+    def test_viewer_cannot_ingest_package(self):
+        viewer = User.objects.create_user(username="pkg-viewer")
+        viewer.profile.role = "viewer"
+        viewer.profile.business_unit = BusinessUnit.objects.create(name="Pkg Viewer BU", code="pkg-viewer-bu")
+        viewer.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(viewer)
+        resp = self._post(_make_package(package_id="AFP-2026-222"))
+        self.assertEqual(resp.status_code, 403)
+
+
+# ── LLMBlueprintGenerator ───────────────────────────────────────────────────────
+
+class LLMBlueprintGeneratorTests(TestCase):
+    """
+    The LLM generator overrides only the design derivation; scoring, status, and
+    persistence stay deterministic. When the LLM path is unavailable or the
+    response is malformed it must fall back to the heuristic design and still
+    produce a valid blueprint.
+    """
+
+    def setUp(self):
+        from controlplane.services.factory import LLMBlueprintGenerator
+        self.gen = LLMBlueprintGenerator()
+
+    def _good_payload(self) -> str:
+        return json.dumps({
+            "agent_name": "Invoice Matcher",
+            "mission": "Match and clear invoices automatically.",
+            "trigger": "New invoice event in SAP",
+            "inputs":  [{"source": "SAP", "description": "Invoice record"}],
+            "outputs": [{"artifact": "matched_invoice"}],
+            "tools":   [{"name": "rest_connector", "target": "SAP"}],
+            "workflow_steps": [
+                {"step": "fetch", "description": "Fetch the invoice"},
+                {"step": "match", "description": "Match to PO", "depends_on": ["fetch"]},
+                {"step": "clear", "description": "Clear for payment", "depends_on": ["match"]},
+            ],
+            "guardrails": [{"rule": "audit_log", "description": "Log every action"}],
+            "human_approval_points": [{"step": "clear", "description": "Approve before payment"}],
+            "success_metrics": [{"metric": "match_rate", "target": "95%"}],
+        })
+
+    # ── availability / fallback ──────────────────────────────────────────────────
+
+    def test_no_api_key_falls_back_to_deterministic(self):
+        insight = _make_insight()
+        with self.settings(ANTHROPIC_API_KEY=""):
+            bp = self.gen.generate(insight)
+        self.assertIsInstance(bp, AgentBlueprint)
+        # Deterministic name suffix proves the heuristic path was used.
+        self.assertIn("Agent", bp.agent_name)
+        self.assertTrue(bp.workflow_steps)
+
+    def test_llm_unavailable_returns_none_from_call(self):
+        insight = _make_insight()
+        with self.settings(ANTHROPIC_API_KEY=""):
+            self.assertIsNone(self.gen._call_llm(insight))
+
+    def test_malformed_response_falls_back(self):
+        insight = _make_insight()
+        with patch.object(self.gen, "_call_llm", return_value="not json at all"):
+            bp = self.gen.generate(insight)
+        self.assertIsInstance(bp, AgentBlueprint)
+        # Matches the deterministic default step set.
+        step_names = [s["step"] for s in bp.workflow_steps]
+        self.assertIn("ingest", step_names)
+
+    # ── happy path ─────────────────────────────────────────────────────────────
+
+    def test_valid_response_uses_llm_design(self):
+        insight = _make_insight()
+        with patch.object(self.gen, "_call_llm", return_value=self._good_payload()):
+            bp = self.gen.generate(insight)
+        self.assertEqual(bp.agent_name, "Invoice Matcher")
+        self.assertEqual([s["step"] for s in bp.workflow_steps], ["fetch", "match", "clear"])
+        self.assertEqual(bp.workflow_steps[1]["depends_on"], ["fetch"])
+
+    def test_scoring_stays_deterministic_under_llm(self):
+        insight = _make_insight()
+        det = blueprint_generator.generate(_make_insight(source_reference="PI-DET"))
+        with patch.object(self.gen, "_call_llm", return_value=self._good_payload()):
+            llm = self.gen.generate(insight)
+        # Same insight shape → identical opportunity score regardless of design source.
+        self.assertEqual(llm.opportunity_score, det.opportunity_score)
+        self.assertEqual(llm.risk_level, det.risk_level)
+
+    def test_response_wrapped_in_code_fence_is_parsed(self):
+        insight = _make_insight()
+        fenced = f"```json\n{self._good_payload()}\n```"
+        with patch.object(self.gen, "_call_llm", return_value=fenced):
+            bp = self.gen.generate(insight)
+        self.assertEqual(bp.agent_name, "Invoice Matcher")
+
+    # ── partial / merge behaviour ────────────────────────────────────────────────
+
+    def test_partial_response_merges_with_deterministic(self):
+        insight = _make_insight()
+        partial = json.dumps({"agent_name": "Partial Agent"})  # everything else missing
+        with patch.object(self.gen, "_call_llm", return_value=partial):
+            bp = self.gen.generate(insight)
+        self.assertEqual(bp.agent_name, "Partial Agent")
+        # Missing fields fall back to deterministic derivation → still complete.
+        self.assertTrue(bp.workflow_steps)
+        self.assertTrue(bp.tools)
+
+    def test_invalid_workflow_steps_fall_back(self):
+        insight = _make_insight()
+        bad_steps = json.dumps({
+            "agent_name": "Steps Agent",
+            "workflow_steps": ["not", "dicts"],
+        })
+        with patch.object(self.gen, "_call_llm", return_value=bad_steps):
+            bp = self.gen.generate(insight)
+        self.assertEqual(bp.agent_name, "Steps Agent")
+        step_names = [s["step"] for s in bp.workflow_steps]
+        self.assertIn("ingest", step_names)  # deterministic default retained
+
+    # ── unit-level helpers ───────────────────────────────────────────────────────
+
+    def test_parse_json_extracts_object(self):
+        self.assertEqual(self.gen._parse_json('  {"a": 1}  '), {"a": 1})
+        self.assertEqual(self.gen._parse_json('prefix {"a": 1} suffix'), {"a": 1})
+        self.assertIsNone(self.gen._parse_json("no object here"))
+        self.assertIsNone(self.gen._parse_json(""))
+
+    def test_coerce_steps_normalises_and_filters(self):
+        steps = self.gen._coerce_steps([
+            {"step": "a", "description": "first"},
+            {"name": "b", "description": "second", "depends_on": ["a", ""]},
+            {"description": "no name — dropped"},
+            "garbage",
+        ])
+        self.assertEqual([s["step"] for s in steps], ["a", "b"])
+        self.assertEqual(steps[1]["depends_on"], ["a"])
+
+    def test_tool_catalog_includes_connectors(self):
+        catalog = self.gen._tool_catalog()
+        self.assertIn("sql_connector", catalog)
+        self.assertIn("rest_connector", catalog)

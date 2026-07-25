@@ -13,3 +13,6 @@ tiktoken>=0.7          # Token-aware chunking for RAG
 pypdf>=4.0             # PDF ingestion
 python-docx>=1.1       # DOCX ingestion
 sqlalchemy>=2.0        # C3 SQL connector
+# Phase 0 — Durable execution
+celery[redis]>=5.4     # Durable async execution backend (workflows + A2A tasks)
+redis>=5.0             # Celery broker / result backend

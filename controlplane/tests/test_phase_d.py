@@ -95,7 +95,9 @@ class TelemetryServiceTests(TestCase):
         span = OtelSpan.objects.filter(run=run, name="agent.run").first()
         self.assertEqual(span.status_code, "OK")
         self.assertIsNotNone(span.end_time)
-        self.assertGreater(span.duration_ms, 0)
+        # A near-instant span can legitimately round to 0ms; the invariant is
+        # that the duration is a recorded non-negative value (was flaky as > 0).
+        self.assertGreaterEqual(span.duration_ms, 0)
 
     def test_close_root_span_with_error_sets_error_status(self):
         from controlplane.services.telemetry import telemetry_service

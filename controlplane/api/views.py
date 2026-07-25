@@ -3,20 +3,35 @@ API v1 views — plain Django JsonResponse, no DRF.
 All endpoints require an authenticated session (login_required).
 """
 import json
+import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
+from django.core.cache import cache
 from django.db.models import Avg, Count, Max, Q, Sum
 from django.http import JsonResponse
 from django.utils import timezone
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
 from controlplane.models import (
     Agent, AgentFeedback, AgentRun, Approval, AuditLog,
     BusinessUnit, DataConnector, Division, EvalCase, EvalRun, EvalSuite,
     KnowledgeDocument, OrgProcess, WorkStream,
 )
+from controlplane.security import (
+    blueprint_business_unit_id as _blueprint_business_unit_id,
+    can_access_agent as _can_access_agent,
+    can_access_business_unit as _can_access_business_unit,
+    can_access_workflow_run as _can_access_workflow_run,
+    is_cross_tenant as _is_cross_tenant,
+    package_business_unit_id as _package_business_unit_id,
+    require_role_json,
+    user_business_unit_id as _user_business_unit_id,
+)
 from controlplane.services.governance import governance, RegistrationError, TransitionError
+from controlplane.services.tools.bindings import promote_to_live, promote_to_sandbox
+from controlplane.services.workflow_compiler import workflow_compiler
 from .aggregations import (
     agent_catalog_telemetry,
     latency_timeseries,
@@ -28,24 +43,106 @@ from .aggregations import (
     runs_timeseries,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _window(request):
     return request.GET.get("window", "30d")
 
 
-def _filters(request):
-    return {
+def _filters(request, enforced_bu_id=None):
+    filters = {
         k: v
         for k, v in {
             "agent_id":        request.GET.get("agent"),
             "platform":        request.GET.get("platform"),
-            "business_unit_id": request.GET.get("business_unit"),
+            "business_unit_id": enforced_bu_id or request.GET.get("business_unit"),
             "division_id":     request.GET.get("division"),
             "work_stream_id":  request.GET.get("work_stream"),
             "process_id":      request.GET.get("process"),
         }.items()
         if v
     }
+    return filters
+
+
+_RATE_LIMIT_WINDOW = 60
+_WORKFLOW_TRIGGER_LIMIT = 5
+_WORKFLOW_BUILD_LIMIT = 5
+
+
+def _require_role(request, *roles: str):
+    return require_role_json(request.user, *roles)
+
+
+def _is_rate_limited(scope: str, limit: int) -> bool:
+    key = f"rl:api:{scope}"
+    count = cache.get(key, 0)
+    if count >= limit:
+        return True
+    cache.set(key, count + 1, timeout=_RATE_LIMIT_WINDOW)
+    return False
+
+
+# ── Platform engineering maturity ──────────────────────────────────────────────
+
+@require_GET
+def platform_health(request):
+    return JsonResponse({
+        "status": "ok",
+        "service": "agentic-controlplane",
+        "timestamp": timezone.now().isoformat(),
+    })
+
+
+@login_required
+@require_GET
+def platform_readiness(request):
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+
+    from controlplane.services.platform_maturity import maturity_snapshot
+
+    payload = maturity_snapshot(window_hours=1)
+    status = 503 if payload["summary"]["unready"] else 200
+    return JsonResponse(
+        {
+            "status": "ready" if status == 200 else "degraded",
+            "summary": payload["summary"],
+        },
+        status=status,
+    )
+
+
+@login_required
+@require_GET
+def platform_maturity(request):
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.services.platform_maturity import maturity_snapshot
+
+    try:
+        window_hours = max(1, int(request.GET.get("window_hours", "24")))
+    except ValueError:
+        return JsonResponse({"error": "window_hours must be an integer."}, status=400)
+    return JsonResponse(maturity_snapshot(window_hours=window_hours))
+
+
+@login_required
+@require_GET
+def platform_success_criteria(request):
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.services.platform_maturity import enterprise_success_criteria
+
+    try:
+        window_hours = max(1, int(request.GET.get("window_hours", "24")))
+    except ValueError:
+        return JsonResponse({"error": "window_hours must be an integer."}, status=400)
+    return JsonResponse(enterprise_success_criteria(window_hours=window_hours))
 
 
 # ── Agent options (lightweight, for filter dropdowns) ─────────────────────────
@@ -64,6 +161,8 @@ def agent_options(request):
         qs = qs.filter(org_work_stream_id=request.GET["work_stream"])
     if request.GET.get("process"):
         qs = qs.filter(org_process_id=request.GET["process"])
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(org_unit_id=_user_business_unit_id(request.user))
     return JsonResponse({"agents": [{"id": str(a.id), "name": a.name} for a in qs]})
 
 
@@ -134,55 +233,86 @@ def agents_list(request):
 
 
 @login_required
-@require_GET
 def agent_detail(request, agent_id):
     from django.shortcuts import get_object_or_404
     agent = get_object_or_404(Agent, id=agent_id)
-    window = _window(request)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+    if request.method == "GET":
+        window = _window(request)
 
-    recent_runs = (
-        AgentRun.objects.filter(agent=agent)
-        .order_by("-started_at")[:20]
-        .values("id", "status", "latency_ms", "input_tokens", "output_tokens",
-                "cost_usd", "model_id", "user_label", "started_at", "completed_at")
-    )
-    runs_list = [
-        {**r, "id": str(r["id"]),
-         "started_at": r["started_at"].isoformat(),
-         "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
-         "cost_usd": float(r["cost_usd"] or 0)}
-        for r in recent_runs
-    ]
+        recent_runs = (
+            AgentRun.objects.filter(agent=agent)
+            .order_by("-started_at")[:20]
+            .values("id", "status", "latency_ms", "input_tokens", "output_tokens",
+                    "cost_usd", "model_id", "user_label", "started_at", "completed_at")
+        )
+        runs_list = [
+            {**r, "id": str(r["id"]),
+             "started_at": r["started_at"].isoformat(),
+             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+             "cost_usd": float(r["cost_usd"] or 0)}
+            for r in recent_runs
+        ]
 
-    summary = monitoring_summary(window, agent_id=str(agent.id))
+        summary = monitoring_summary(window, agent_id=str(agent.id))
 
-    return JsonResponse({
-        "agent": {
-            "id": str(agent.id),
-            "name": agent.name,
-            "platform": agent.platform,
-            "platform_display": agent.get_platform_display(),
-            "status": agent.status,
-            "risk_tier": agent.risk_tier,
-            "owner": agent.owner,
-            "version": agent.version,
-            "model_id": agent.model_id,
-            "purpose": agent.purpose,
-        },
-        "summary": summary,
-        "recent_runs": runs_list,
-    })
+        return JsonResponse({
+            "agent": {
+                "id": str(agent.id),
+                "name": agent.name,
+                "platform": agent.platform,
+                "platform_display": agent.get_platform_display(),
+                "status": agent.status,
+                "risk_tier": agent.risk_tier,
+                "owner": agent.owner,
+                "version": agent.version,
+                "model_id": agent.model_id,
+                "purpose": agent.purpose,
+            },
+            "summary": summary,
+            "recent_runs": runs_list,
+        })
+
+    if request.method == "DELETE":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
+        if agent.status != Agent.Status.DRAFT:
+            return JsonResponse({"error": "Only draft agents can be deleted from the catalog."}, status=400)
+        if agent.source_blueprints.exists():
+            return JsonResponse(
+                {"error": "This draft agent is still linked to a blueprint. Delete the blueprint first."},
+                status=400,
+            )
+        agent_id_str = str(agent.id)
+        agent_name = agent.name
+        agent.delete()
+        AuditLog.objects.create(
+            actor=request.user.username,
+            action="agent_deleted",
+            resource_type="Agent",
+            resource_id=agent_id_str,
+            payload={"agent_name": agent_name, "source": "catalog"},
+        )
+        return JsonResponse({"deleted": True, "id": agent_id_str}, status=200)
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)
 
 
 @login_required
 @require_GET
 def agent_metrics(request, agent_id):
+    from django.shortcuts import get_object_or_404
+    agent = get_object_or_404(Agent, id=agent_id)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
     window = _window(request)
     bucket = request.GET.get("bucket", "day")
     return JsonResponse({
-        "timeseries": runs_timeseries(window, bucket, agent_id=agent_id),
-        "latency": latency_timeseries(window, bucket, agent_id=agent_id),
-        "ratings": rating_distribution(window, agent_id=agent_id),
+        "timeseries": runs_timeseries(window, bucket, agent_id=str(agent.id)),
+        "latency": latency_timeseries(window, bucket, agent_id=str(agent.id)),
+        "ratings": rating_distribution(window, agent_id=str(agent.id)),
     })
 
 
@@ -191,7 +321,8 @@ def agent_metrics(request, agent_id):
 @login_required
 @require_GET
 def monitoring_summary_view(request):
-    return JsonResponse(monitoring_summary(_window(request), **_filters(request)))
+    enforced_bu_id = None if _is_cross_tenant(request.user) else _user_business_unit_id(request.user)
+    return JsonResponse(monitoring_summary(_window(request), **_filters(request, enforced_bu_id)))
 
 
 @login_required
@@ -199,7 +330,8 @@ def monitoring_summary_view(request):
 def monitoring_timeseries(request):
     window = _window(request)
     bucket = request.GET.get("bucket", "day")
-    filters = _filters(request)
+    enforced_bu_id = None if _is_cross_tenant(request.user) else _user_business_unit_id(request.user)
+    filters = _filters(request, enforced_bu_id)
     return JsonResponse({
         "runs": runs_timeseries(window, bucket, **filters),
         "latency": latency_timeseries(window, bucket, **filters),
@@ -210,11 +342,13 @@ def monitoring_timeseries(request):
 @require_GET
 def monitoring_breakdowns(request):
     window = _window(request)
+    enforced_bu_id = None if _is_cross_tenant(request.user) else _user_business_unit_id(request.user)
+    filters = _filters(request, enforced_bu_id)
     return JsonResponse({
-        "by_platform": runs_by_platform(window),
-        "by_agent": runs_by_agent(window),
-        "ratings": rating_distribution(window),
-        "low_rated": low_rated_runs(window),
+        "by_platform": runs_by_platform(window, **filters),
+        "by_agent": runs_by_agent(window, **filters),
+        "ratings": rating_distribution(window, **filters),
+        "low_rated": low_rated_runs(window, **filters),
     })
 
 
@@ -333,6 +467,11 @@ def _is_approver(user) -> bool:
 def agent_approvals(request, agent_id):
     from django.shortcuts import get_object_or_404
     agent = get_object_or_404(Agent, id=agent_id)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+    role_error = _require_role(request, "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
 
     if request.method == "GET":
         approvals = Approval.objects.filter(agent=agent).order_by("-created_at")[:20]
@@ -432,7 +571,8 @@ def agent_register(request):
     except PermissionError as e:
         return JsonResponse({"error": str(e)}, status=403)
     except Exception as e:
-        return JsonResponse({"error": f"Unexpected error: {e}"}, status=500)
+        logger.exception("Unexpected error during agent registration")
+        return JsonResponse({"error": "Unexpected server error."}, status=500)
 
     return JsonResponse(
         {
@@ -488,6 +628,8 @@ def eval_suites(request, agent_id):
     """GET /api/v1/agents/<id>/evals/ — list suites + latest run for an agent."""
     from django.shortcuts import get_object_or_404
     agent = get_object_or_404(Agent, id=agent_id)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
     suites = EvalSuite.objects.filter(agent=agent).prefetch_related("runs").order_by("-created_at")
     data = []
     for s in suites:
@@ -546,6 +688,8 @@ def eval_run_detail(request, run_id):
     """GET /api/v1/evals/runs/<run_id>/ — fetch a single run result."""
     from django.shortcuts import get_object_or_404
     run = get_object_or_404(EvalRun, id=run_id)
+    if not _can_access_agent(request.user, run.suite.agent):
+        return JsonResponse({"error": "You do not have access to this eval run."}, status=403)
     return JsonResponse({
         "id": str(run.id),
         "suite": run.suite.name,
@@ -573,6 +717,8 @@ def semantic_search(request):
         return JsonResponse({"error": "q parameter required."}, status=400)
     top_k = min(int(request.GET.get("top_k", 5)), 20)
     bu_id = request.GET.get("business_unit") or None
+    if not _is_cross_tenant(request.user):
+        bu_id = str(_user_business_unit_id(request.user)) if _user_business_unit_id(request.user) else None
 
     from controlplane.services.embeddings import embedding_service
     results = embedding_service.search_agents(query, top_k=top_k, business_unit_id=bu_id)
@@ -587,6 +733,8 @@ def knowledge_documents(request):
     """GET /api/v1/knowledge/ — list documents accessible to the user."""
     qs = KnowledgeDocument.objects.filter(status="ready").order_by("-created_at")
     bu_id = request.GET.get("business_unit")
+    if not _is_cross_tenant(request.user):
+        bu_id = str(_user_business_unit_id(request.user)) if _user_business_unit_id(request.user) else None
     if bu_id:
         from django.db.models import Q as _Q
         qs = qs.filter(_Q(business_unit_id=bu_id) | _Q(business_unit__isnull=True))
@@ -627,9 +775,11 @@ def knowledge_retrieve(request):
     from django.shortcuts import get_object_or_404
 
     agent = get_object_or_404(Agent, id=agent_id) if agent_id else None
+    if agent is not None and not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent's knowledge scope."}, status=403)
 
     class _AnonAgent:
-        org_unit_id = None
+        org_unit_id = _user_business_unit_id(request.user)
     passages = rag_service.retrieve(
         query=query,
         agent=agent or _AnonAgent(),
@@ -662,6 +812,14 @@ def knowledge_ingest(request):
     bu = None
     if bu_id:
         bu = BusinessUnit.objects.filter(pk=bu_id).first()
+    if not _is_cross_tenant(request.user):
+        own_bu_id = _user_business_unit_id(request.user)
+        if own_bu_id is None:
+            return JsonResponse({"error": "No business unit assigned to your account."}, status=403)
+        if bu is not None and str(bu.id) != str(own_bu_id):
+            return JsonResponse({"error": "You cannot ingest knowledge into another business unit."}, status=403)
+        if bu is None:
+            bu = BusinessUnit.objects.filter(pk=own_bu_id).first()
 
     from controlplane.services.rag import rag_service
     doc = rag_service.ingest_text(
@@ -689,6 +847,8 @@ def connectors_list(request):
     """GET /api/v1/connectors/ — list active connectors for the user's BU."""
     qs = DataConnector.objects.filter(is_active=True).order_by("name")
     bu_id = request.GET.get("business_unit")
+    if not _is_cross_tenant(request.user):
+        bu_id = str(_user_business_unit_id(request.user)) if _user_business_unit_id(request.user) else None
     if bu_id:
         from django.db.models import Q as _Q
         qs = qs.filter(_Q(business_unit_id=bu_id) | _Q(business_unit__isnull=True))
@@ -706,6 +866,285 @@ def connectors_list(request):
     })
 
 
+# ── Phase 1: MCP interop (register / sync / bind) ──────────────────────────────
+
+def _mcp_server_dict(s, *, include_catalog: bool = False) -> dict:
+    data = {
+        "id": str(s.id),
+        "name": s.name,
+        "base_url": s.base_url,
+        "transport": s.transport,
+        "status": s.status,
+        "source": s.source,
+        "business_unit": s.business_unit.name if s.business_unit else None,
+        "tool_count": len(s.tool_catalog or []),
+        "catalog_synced_at": s.catalog_synced_at.isoformat() if s.catalog_synced_at else None,
+        "is_usable": s.is_usable,
+    }
+    if include_catalog:
+        data["tool_catalog"] = s.tool_catalog or []
+    return data
+
+
+def _can_access_mcp_server(user, server) -> bool:
+    if _is_cross_tenant(user):
+        return True
+    if server.business_unit_id is None:
+        return True
+    return str(server.business_unit_id) == str(_user_business_unit_id(user))
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def mcp_servers(request):
+    """
+    GET  /api/v1/mcp/servers/  — list registered MCP servers for the user's BU.
+    POST /api/v1/mcp/servers/  — register a server {name, base_url, transport?, auth_ref?, business_unit?}
+    """
+    from controlplane.models import RemoteMcpServer
+
+    if request.method == "GET":
+        qs = RemoteMcpServer.objects.filter(is_active=True).order_by("name")
+        if not _is_cross_tenant(request.user):
+            bu_id = _user_business_unit_id(request.user)
+            if bu_id:
+                qs = qs.filter(Q(business_unit_id=bu_id) | Q(business_unit__isnull=True))
+        return JsonResponse({"servers": [_mcp_server_dict(s) for s in qs]})
+
+    # POST — register
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    name = (body.get("name") or "").strip()
+    base_url = (body.get("base_url") or "").strip()
+    if not name or not base_url:
+        return JsonResponse({"error": "name and base_url are required."}, status=400)
+
+    from controlplane.services.interop.net_guard import (
+        validate_destination, BlockedDestinationError,
+    )
+    try:
+        validate_destination(base_url)
+    except BlockedDestinationError as exc:
+        return JsonResponse({"error": f"base_url rejected: {exc}"}, status=400)
+
+    transport = (body.get("transport") or "http").strip().lower()
+    if transport not in {"http", "sse"}:
+        return JsonResponse({"error": "transport must be 'http' or 'sse'."}, status=400)
+
+    bu = None
+    bu_id = body.get("business_unit")
+    if not bu_id and not _is_cross_tenant(request.user):
+        bu_id = _user_business_unit_id(request.user)
+    if bu_id:
+        bu = BusinessUnit.objects.filter(id=bu_id).first()
+
+    from django.db import IntegrityError
+    try:
+        server = RemoteMcpServer.objects.create(
+            name=name, base_url=base_url, transport=transport,
+            auth_ref=(body.get("auth_ref") or "").strip(),
+            business_unit=bu, source="manual", created_by=request.user.username,
+        )
+    except IntegrityError:
+        return JsonResponse(
+            {"error": "A server with this name already exists in this business unit."},
+            status=409,
+        )
+    AuditLog.objects.create(
+        actor=request.user.username, action="mcp_server_registered",
+        resource_type="RemoteMcpServer", resource_id=str(server.id),
+        payload={"name": name, "base_url": base_url},
+    )
+    return JsonResponse(_mcp_server_dict(server), status=201)
+
+
+@login_required
+@require_http_methods(["GET", "DELETE"])
+def mcp_server_detail(request, server_id):
+    """GET detail (with catalog) / DELETE = disable a registered MCP server."""
+    from controlplane.models import RemoteMcpServer
+    try:
+        server = RemoteMcpServer.objects.get(id=server_id)
+    except RemoteMcpServer.DoesNotExist:
+        return JsonResponse({"error": "MCP server not found."}, status=404)
+    if not _can_access_mcp_server(request.user, server):
+        return JsonResponse({"error": "You do not have access to this server."}, status=403)
+
+    if request.method == "GET":
+        return JsonResponse(_mcp_server_dict(server, include_catalog=True))
+
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    server.is_active = False
+    server.status = RemoteMcpServer.Status.DISABLED
+    server.save(update_fields=["is_active", "status", "updated_at"])
+    AuditLog.objects.create(
+        actor=request.user.username, action="mcp_server_disabled",
+        resource_type="RemoteMcpServer", resource_id=str(server.id),
+        payload={"name": server.name},
+    )
+    return JsonResponse({"status": "disabled", "id": str(server.id)})
+
+
+@login_required
+@require_POST
+def mcp_server_sync(request, server_id):
+    """POST /api/v1/mcp/servers/<id>/sync/ — introspect + cache the tool catalog."""
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.models import RemoteMcpServer
+    try:
+        server = RemoteMcpServer.objects.get(id=server_id)
+    except RemoteMcpServer.DoesNotExist:
+        return JsonResponse({"error": "MCP server not found."}, status=404)
+    if not _can_access_mcp_server(request.user, server):
+        return JsonResponse({"error": "You do not have access to this server."}, status=403)
+
+    from controlplane.services.interop import mcp_client
+    from controlplane.services.interop.mcp_client import McpClientError
+    try:
+        tools = mcp_client.list_tools(server, actor=request.user.username)
+    except McpClientError as exc:
+        return JsonResponse({"error": f"Catalog sync failed: {exc}"}, status=502)
+    return JsonResponse({"server": _mcp_server_dict(server), "tools": tools})
+
+
+@login_required
+@require_POST
+def agent_mcp_bindings(request, agent_id):
+    """
+    POST /api/v1/agents/<id>/mcp-bindings/ — bind an MCP tool to an agent.
+
+    Body: { "mcp_server_id": "...", "mcp_tool_name": "...", "tool_name": "optional" }
+    Creates a SANDBOX (or PROPOSED) binding — never live.
+    """
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        agent = Agent.objects.get(id=agent_id)
+    except Agent.DoesNotExist:
+        return JsonResponse({"error": "Agent not found."}, status=404)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    server_id = body.get("mcp_server_id")
+    mcp_tool_name = (body.get("mcp_tool_name") or "").strip()
+    if not server_id or not mcp_tool_name:
+        return JsonResponse({"error": "mcp_server_id and mcp_tool_name are required."}, status=400)
+
+    from controlplane.models import RemoteMcpServer
+    try:
+        server = RemoteMcpServer.objects.get(id=server_id)
+    except RemoteMcpServer.DoesNotExist:
+        return JsonResponse({"error": "MCP server not found."}, status=404)
+    if not _can_access_mcp_server(request.user, server):
+        return JsonResponse({"error": "You do not have access to this server."}, status=403)
+    if server.tool_schema(mcp_tool_name) is None:
+        return JsonResponse(
+            {"error": f"Tool '{mcp_tool_name}' not in server catalog — sync the server first."},
+            status=400,
+        )
+
+    from controlplane.services.tools.bindings import create_mcp_binding
+    binding = create_mcp_binding(
+        agent, server, mcp_tool_name,
+        tool_name=body.get("tool_name"), created_by=request.user.username,
+    )
+    AuditLog.objects.create(
+        actor=request.user.username, action="mcp_binding_created",
+        resource_type="AgentToolBinding", resource_id=str(binding.id),
+        payload={
+            "agent_id": str(agent.id), "server": server.name,
+            "mcp_tool": mcp_tool_name, "status": binding.binding_status,
+        },
+    )
+    return JsonResponse({
+        "id": str(binding.id),
+        "tool_name": binding.tool_name,
+        "mcp_tool_name": binding.mcp_tool_name,
+        "binding_status": binding.binding_status,
+        "server": server.name,
+    }, status=201)
+
+
+# ── Phase 1: A2A card preview / publish ────────────────────────────────────────
+
+@login_required
+@require_GET
+def agent_a2a_card_preview(request, agent_id):
+    """GET /api/v1/agents/<id>/a2a-card/ — preview the projected card + publish state."""
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        agent = Agent.objects.get(id=agent_id)
+    except Agent.DoesNotExist:
+        return JsonResponse({"error": "Agent not found."}, status=404)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+
+    from controlplane.services.interop.a2a_cards import build_card
+    base_url = getattr(settings, "A2A_PUBLIC_BASE_URL", "") or request.build_absolute_uri("/")
+    card = build_card(agent, base_url=base_url)
+    existing = getattr(agent, "a2a_card", None)
+    return JsonResponse({
+        "card": card,
+        "is_published": bool(existing and existing.is_published),
+        "publishable": agent.status in {Agent.Status.PILOT, Agent.Status.PRODUCTION},
+    })
+
+
+@login_required
+@require_POST
+def agent_a2a_card_publish(request, agent_id):
+    """
+    POST /api/v1/agents/<id>/a2a-card/publish/ — publish or unpublish the card.
+
+    Body: { "publish": true | false }  (publishing requires agent_approver)
+    """
+    role_error = _require_role(request, "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        agent = Agent.objects.get(id=agent_id)
+    except Agent.DoesNotExist:
+        return JsonResponse({"error": "Agent not found."}, status=404)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    publish = bool(body.get("publish", True))
+
+    from controlplane.services.interop.a2a_cards import (
+        publish_card, unpublish_card, CardPublishError,
+    )
+    if publish:
+        base_url = getattr(settings, "A2A_PUBLIC_BASE_URL", "") or request.build_absolute_uri("/")
+        try:
+            card = publish_card(agent, base_url=base_url, by=request.user.username)
+        except CardPublishError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse({"status": "published", "card": card.card_json})
+
+    unpublish_card(agent, by=request.user.username)
+    return JsonResponse({"status": "unpublished"})
+
+
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────
 
 @login_required
@@ -718,6 +1157,9 @@ def prometheus_metrics(request):
     Protect with HTTP Basic Auth or restrict to internal IPs in production.
     Render: allow Grafana Cloud scraper to hit this endpoint.
     """
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
     from controlplane.services.metrics import render_metrics
     from django.http import HttpResponse
     payload = render_metrics()
@@ -748,6 +1190,8 @@ def otel_spans(request):
         qs = qs.filter(agent_id=agent_id)
     if trace_id:
         qs = qs.filter(trace_id=trace_id)
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
 
     limit = min(int(request.GET.get("limit", 100)), 500)
     spans = list(qs[:limit])
@@ -786,6 +1230,8 @@ def budget_alerts(request):
     """
     from controlplane.models import BudgetAlert
     qs = BudgetAlert.objects.select_related("agent").order_by("-created_at")
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
     if request.GET.get("resolved", "false").lower() == "false":
         qs = qs.filter(resolved=False)
     limit = min(int(request.GET.get("limit", 50)), 200)
@@ -817,6 +1263,8 @@ def workflows_list(request):
     """GET /api/v1/workflows/ — list workflows."""
     from controlplane.models import Workflow
     qs = Workflow.objects.select_related("business_unit").order_by("name")
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(business_unit_id=_user_business_unit_id(request.user))
     status_filter = request.GET.get("status")
     if status_filter:
         qs = qs.filter(status=status_filter)
@@ -846,6 +1294,8 @@ def workflow_detail(request, workflow_id):
         w = Workflow.objects.prefetch_related("tasks__agent").get(id=workflow_id)
     except Workflow.DoesNotExist:
         return JsonResponse({"error": "Workflow not found."}, status=404)
+    if not _can_access_business_unit(request.user, w.business_unit_id):
+        return JsonResponse({"error": "You do not have access to this workflow."}, status=403)
 
     return JsonResponse({
         "id":           str(w.id),
@@ -878,13 +1328,17 @@ def workflow_detail(request, workflow_id):
 def workflow_trigger(request, workflow_id):
     """POST /api/v1/workflows/<id>/run/ — trigger a workflow run."""
     from controlplane.models import Workflow
-    from controlplane.services.orchestrator import orchestrator
-    import threading
+    from controlplane.services.workflow_queue import workflow_queue
 
     try:
         w = Workflow.objects.get(id=workflow_id, status=Workflow.Status.ACTIVE)
     except Workflow.DoesNotExist:
         return JsonResponse({"error": "Workflow not found or not active."}, status=404)
+    if not _can_access_business_unit(request.user, w.business_unit_id):
+        return JsonResponse({"error": "You do not have access to this workflow."}, status=403)
+    rl_scope = f"workflow-trigger:{request.user.id}:{workflow_id}"
+    if _is_rate_limited(rl_scope, _WORKFLOW_TRIGGER_LIMIT):
+        return JsonResponse({"error": "Rate limit exceeded. Try again shortly."}, status=429)
 
     try:
         body = json.loads(request.body or "{}")
@@ -892,19 +1346,12 @@ def workflow_trigger(request, workflow_id):
         body = {}
 
     inputs = body.get("inputs", {})
-    run = orchestrator.start(w, inputs=inputs, triggered_by=request.user.username)
-
-    # Execute in a background thread so the HTTP response is immediate
-    def _run():
-        orchestrator.execute(run)
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    run = workflow_queue.enqueue(w, inputs=inputs, triggered_by=request.user.username)
 
     return JsonResponse({
         "workflow_run_id": str(run.id),
         "status":          run.status,
-        "message":         "Workflow run started.",
+        "message":         "Workflow run queued.",
     }, status=202)
 
 
@@ -919,6 +1366,8 @@ def workflow_run_detail(request, run_id):
         r = WorkflowRun.objects.select_related("workflow").get(id=run_id)
     except WorkflowRun.DoesNotExist:
         return JsonResponse({"error": "Workflow run not found."}, status=404)
+    if not _can_access_workflow_run(request.user, r):
+        return JsonResponse({"error": "You do not have access to this workflow run."}, status=403)
 
     return JsonResponse({
         "id":           str(r.id),
@@ -943,6 +1392,8 @@ def workflow_run_tasks(request, run_id):
         r = WorkflowRun.objects.get(id=run_id)
     except WorkflowRun.DoesNotExist:
         return JsonResponse({"error": "Workflow run not found."}, status=404)
+    if not _can_access_workflow_run(request.user, r):
+        return JsonResponse({"error": "You do not have access to this workflow run."}, status=403)
 
     task_runs = r.task_runs.select_related("task__agent").order_by("started_at")
     return JsonResponse({
@@ -976,6 +1427,8 @@ def model_route_explain(request, agent_id):
         agent = Agent.objects.get(id=agent_id)
     except Agent.DoesNotExist:
         return JsonResponse({"error": "Agent not found."}, status=404)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
     return JsonResponse(model_router.explain(agent))
 
 
@@ -1101,6 +1554,38 @@ def _blueprint_dict(bp) -> dict:
     }
 
 
+def _workflow_dict(workflow) -> dict:
+    return {
+        "id": str(workflow.id),
+        "slug": workflow.slug,
+        "name": workflow.name,
+        "description": workflow.description,
+        "status": workflow.status,
+        "owner": workflow.owner,
+        "business_unit": workflow.business_unit.name if workflow.business_unit else None,
+        "task_count": workflow.tasks.count(),
+        "created_at": workflow.created_at.isoformat(),
+        "updated_at": workflow.updated_at.isoformat(),
+    }
+
+
+def _workflow_run_dict(run) -> dict:
+    if run is None:
+        return None
+    return {
+        "id": str(run.id),
+        "workflow_id": str(run.workflow_id),
+        "status": run.status,
+        "triggered_by": run.triggered_by,
+        "inputs": run.inputs,
+        "outputs": run.outputs,
+        "error": run.error,
+        "duration_ms": run.duration_ms,
+        "started_at": run.started_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+
+
 @login_required
 def factory_insights_list(request):
     """
@@ -1111,12 +1596,17 @@ def factory_insights_list(request):
 
     if request.method == "GET":
         qs = ProcessInsight.objects.select_related("business_unit").order_by("-created_at")
+        if not _is_cross_tenant(request.user):
+            qs = qs.filter(business_unit_id=_user_business_unit_id(request.user))
         finding_type = request.GET.get("finding_type")
         if finding_type:
             qs = qs.filter(finding_type=finding_type)
         return JsonResponse({"insights": [_insight_dict(i) for i in qs[:200]]})
 
     if request.method == "POST":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
         try:
             body = json.loads(request.body)
         except Exception:
@@ -1142,6 +1632,14 @@ def factory_insights_list(request):
                     bu = BusinessUnit.objects.get(id=bu_val)
                 except (BusinessUnit.DoesNotExist, Exception):
                     pass
+        if not _is_cross_tenant(request.user):
+            own_bu_id = _user_business_unit_id(request.user)
+            if own_bu_id is None:
+                return JsonResponse({"error": "No business unit assigned to your account."}, status=403)
+            if bu is not None and str(bu.id) != str(own_bu_id):
+                return JsonResponse({"error": "You cannot create insights in another business unit."}, status=403)
+            if bu is None:
+                bu = BusinessUnit.objects.filter(pk=own_bu_id).first()
 
         defaults = {
             "process_name":       process_name,
@@ -1170,18 +1668,24 @@ def factory_insight_detail(request, insight_id):
     """
     GET   /api/v1/factory/insights/<id>/  — retrieve
     PATCH /api/v1/factory/insights/<id>/  — update editable fields
+    DELETE /api/v1/factory/insights/<id>/ — delete
     """
-    from controlplane.models import ProcessInsight
+    from controlplane.models import ProcessInsight, AuditLog
 
     try:
         insight = ProcessInsight.objects.select_related("business_unit").get(id=insight_id)
     except ProcessInsight.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, insight.business_unit_id):
+        return JsonResponse({"error": "You do not have access to this insight."}, status=403)
 
     if request.method == "GET":
         return JsonResponse(_insight_dict(insight))
 
     if request.method in ("PATCH", "PUT"):
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
         try:
             body = json.loads(request.body)
         except Exception:
@@ -1197,6 +1701,21 @@ def factory_insight_detail(request, insight_id):
                 setattr(insight, field, body[field])
         insight.save()
         return JsonResponse(_insight_dict(insight))
+
+    if request.method == "DELETE":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
+        insight_id_str = str(insight.id)
+        AuditLog.objects.create(
+            actor=request.user.username,
+            action="factory_insight_deleted",
+            resource_type="ProcessInsight",
+            resource_id=insight_id_str,
+            payload={"source_reference": insight.source_reference, "process_name": insight.process_name},
+        )
+        insight.delete()
+        return JsonResponse({"deleted": True, "id": insight_id_str}, status=200)
 
     return JsonResponse({"error": "Method not allowed."}, status=405)
 
@@ -1215,6 +1734,11 @@ def factory_insight_generate_blueprint(request, insight_id):
         insight = ProcessInsight.objects.select_related("business_unit").get(id=insight_id)
     except ProcessInsight.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, insight.business_unit_id):
+        return JsonResponse({"error": "You do not have access to this insight."}, status=403)
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
 
     blueprint = blueprint_generator.generate(insight)
     return JsonResponse(_blueprint_dict(blueprint), status=201)
@@ -1229,6 +1753,9 @@ def factory_blueprints_list(request):
         return JsonResponse({"error": "Method not allowed."}, status=405)
 
     qs = AgentBlueprint.objects.select_related("insight", "approved_by", "built_agent")
+    if not _is_cross_tenant(request.user):
+        bu_id = _user_business_unit_id(request.user)
+        qs = qs.filter(Q(insight__business_unit_id=bu_id) | Q(built_agent__org_unit_id=bu_id))
     status_filter = request.GET.get("status")
     if status_filter:
         qs = qs.filter(status=status_filter)
@@ -1244,8 +1771,9 @@ def factory_blueprint_detail(request, blueprint_id):
     """
     GET   /api/v1/factory/blueprints/<id>/  — retrieve
     PATCH /api/v1/factory/blueprints/<id>/  — update editable fields (draft/needs_* only)
+    DELETE /api/v1/factory/blueprints/<id>/ — delete
     """
-    from controlplane.models import AgentBlueprint
+    from controlplane.models import AgentBlueprint, AuditLog
 
     try:
         bp = AgentBlueprint.objects.select_related(
@@ -1253,11 +1781,16 @@ def factory_blueprint_detail(request, blueprint_id):
         ).get(id=blueprint_id)
     except AgentBlueprint.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, _blueprint_business_unit_id(bp)):
+        return JsonResponse({"error": "You do not have access to this blueprint."}, status=403)
 
     if request.method == "GET":
         return JsonResponse(_blueprint_dict(bp))
 
     if request.method in ("PATCH", "PUT"):
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
         if bp.status not in (
             AgentBlueprint.Status.DRAFT,
             AgentBlueprint.Status.NEEDS_DATA,
@@ -1292,6 +1825,42 @@ def factory_blueprint_detail(request, blueprint_id):
         bp.save()
         return JsonResponse(_blueprint_dict(bp))
 
+    if request.method == "DELETE":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
+        built_agent = bp.built_agent
+        bp_id_str = str(bp.id)
+        AuditLog.objects.create(
+            actor=request.user.username,
+            action="factory_blueprint_deleted",
+            resource_type="AgentBlueprint",
+            resource_id=bp_id_str,
+            payload={
+                "agent_name": bp.agent_name,
+                "status": bp.status,
+                "built_agent_id": str(bp.built_agent_id) if bp.built_agent_id else None,
+            },
+        )
+        bp.delete()
+        deleted_agent_id = None
+        if (
+            built_agent is not None
+            and built_agent.status == Agent.Status.DRAFT
+            and not built_agent.source_blueprints.exists()
+            and not built_agent.source_packages.exists()
+        ):
+            deleted_agent_id = str(built_agent.id)
+            built_agent.delete()
+            AuditLog.objects.create(
+                actor=request.user.username,
+                action="agent_deleted",
+                resource_type="Agent",
+                resource_id=deleted_agent_id,
+                payload={"source": "factory_blueprint_delete"},
+            )
+        return JsonResponse({"deleted": True, "id": bp_id_str, "deleted_agent_id": deleted_agent_id}, status=200)
+
     return JsonResponse({"error": "Method not allowed."}, status=405)
 
 
@@ -1308,6 +1877,11 @@ def factory_blueprint_approve(request, blueprint_id):
         bp = AgentBlueprint.objects.get(id=blueprint_id)
     except AgentBlueprint.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, _blueprint_business_unit_id(bp)):
+        return JsonResponse({"error": "You do not have access to this blueprint."}, status=403)
+    role_error = _require_role(request, "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
 
     if bp.status == AgentBlueprint.Status.APPROVED:
         return JsonResponse({"error": "Blueprint is already approved."}, status=400)
@@ -1354,6 +1928,11 @@ def factory_blueprint_build(request, blueprint_id):
         bp = AgentBlueprint.objects.select_related("insight__business_unit").get(id=blueprint_id)
     except AgentBlueprint.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, _blueprint_business_unit_id(bp)):
+        return JsonResponse({"error": "You do not have access to this blueprint."}, status=403)
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
 
     try:
         agent = build_compiler.build(bp, built_by=request.user.username)
@@ -1369,6 +1948,168 @@ def factory_blueprint_build(request, blueprint_id):
             "status": agent.status,
         },
     }, status=201)
+
+
+@login_required
+@require_POST
+def factory_blueprint_build_workflow(request, blueprint_id):
+    """
+    POST /api/v1/factory/blueprints/<id>/build-workflow/
+    Compiles a built blueprint into a Workflow DAG and optionally runs it.
+    """
+    from controlplane.models import AgentBlueprint, AuditLog
+
+    try:
+        bp = AgentBlueprint.objects.select_related("built_agent", "insight__business_unit").get(id=blueprint_id)
+    except AgentBlueprint.DoesNotExist:
+        return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, _blueprint_business_unit_id(bp)):
+        return JsonResponse({"error": "You do not have access to this blueprint."}, status=403)
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+
+    if bp.built_agent_id is None:
+        return JsonResponse(
+            {"error": "Blueprint must be built before compiling a workflow."},
+            status=400,
+        )
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+
+    inputs = body.get("inputs") or {}
+    run_in_sandbox = body.get("run", True)
+    if isinstance(run_in_sandbox, str):
+        run_in_sandbox = run_in_sandbox.lower() not in {"false", "0", "no"}
+    else:
+        run_in_sandbox = bool(run_in_sandbox)
+    if _is_rate_limited(f"build-workflow:{request.user.id}:{blueprint_id}", _WORKFLOW_BUILD_LIMIT):
+        return JsonResponse({"error": "Rate limit exceeded. Try again shortly."}, status=429)
+
+    if run_in_sandbox:
+        workflow, run = workflow_compiler.compile_and_run(
+            bp,
+            inputs=inputs,
+            triggered_by=request.user.username,
+            agent=bp.built_agent,
+            activate=False,
+        )
+    else:
+        workflow = workflow_compiler.compile(
+            bp,
+            agent=bp.built_agent,
+            built_by=request.user.username,
+            activate=False,
+        )
+        run = None
+
+    AuditLog.objects.create(
+        actor=request.user.username,
+        action="workflow_compiled",
+        resource_type="Workflow",
+        resource_id=str(workflow.id),
+        payload={
+            "blueprint_id": str(bp.id),
+            "run_id": str(run.id) if run is not None else None,
+            "run_requested": bool(run_in_sandbox),
+        },
+    )
+
+    return JsonResponse(
+        {
+            "blueprint": _blueprint_dict(bp),
+            "workflow": _workflow_dict(workflow),
+            "run": _workflow_run_dict(run),
+        },
+        status=201,
+    )
+
+
+@login_required
+@require_POST
+def factory_tool_bindings_promote(request, agent_id):
+    """
+    POST /api/v1/factory/agents/<id>/tool-bindings/promote/
+
+    Body:
+      { "mode": "sandbox"|"live", "tool_name": "optional single binding" }
+    """
+    from controlplane.models import Agent, AgentToolBinding
+    from controlplane.models import AgentFactoryPackage, AuditLog
+
+    try:
+        agent = Agent.objects.get(id=agent_id)
+    except Agent.DoesNotExist:
+        return JsonResponse({"error": "Agent not found."}, status=404)
+    if not _can_access_agent(request.user, agent):
+        return JsonResponse({"error": "You do not have access to this agent."}, status=403)
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+
+    mode = str(body.get("mode", "sandbox")).lower()
+    if mode not in {"sandbox", "live"}:
+        return JsonResponse({"error": "mode must be 'sandbox' or 'live'."}, status=400)
+    required_roles = ("agent_approver", "platform_admin") if mode == "live" else (
+        "agent_builder", "agent_approver", "platform_admin"
+    )
+    role_error = _require_role(request, *required_roles)
+    if role_error is not None:
+        return role_error
+    tool_name = (body.get("tool_name") or "").strip()
+
+    bindings = AgentToolBinding.objects.filter(agent=agent).select_related("connector")
+    if tool_name:
+        bindings = bindings.filter(tool_name=tool_name)
+    bindings = list(bindings)
+    if not bindings:
+        return JsonResponse({"error": "No bindings found for this agent."}, status=404)
+
+    package = agent.source_packages.order_by("-created_at").first()
+    promoted = []
+    from django.db import transaction
+    try:
+        with transaction.atomic():
+            for binding in bindings:
+                if mode == "live":
+                    promoted.append(promote_to_live(binding, approver=request.user, package=package))
+                else:
+                    promoted.append(promote_to_sandbox(binding, by=request.user.username))
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    AuditLog.objects.create(
+        actor=request.user.username,
+        action="tool_bindings_promoted",
+        resource_type="Agent",
+        resource_id=str(agent.id),
+        payload={
+            "mode": mode,
+            "tool_name": tool_name or None,
+            "binding_count": len(promoted),
+            "package_id": package.package_id if isinstance(package, AgentFactoryPackage) else None,
+        },
+    )
+
+    return JsonResponse({
+        "agent_id": str(agent.id),
+        "mode": mode,
+        "bindings": [
+            {
+                "id": str(binding.id),
+                "tool_name": binding.tool_name,
+                "binding_status": binding.binding_status,
+                "approved_at": binding.approved_at.isoformat() if binding.approved_at else None,
+                "approved_by": binding.approved_by.username if binding.approved_by else None,
+            }
+            for binding in promoted
+        ],
+    }, status=200)
 
 
 # ── Agent Factory — Package ingestion (canonical handoff) ─────────────────────
@@ -1420,12 +2161,22 @@ def factory_packages_list(request):
         qs = (AgentFactoryPackage.objects
               .select_related("insight", "blueprint", "sandbox_agent")
               .order_by("-created_at"))
+        if not _is_cross_tenant(request.user):
+            bu_id = _user_business_unit_id(request.user)
+            qs = qs.filter(
+                Q(insight__business_unit_id=bu_id)
+                | Q(blueprint__insight__business_unit_id=bu_id)
+                | Q(sandbox_agent__org_unit_id=bu_id)
+            )
         status_filter = request.GET.get("status")
         if status_filter:
             qs = qs.filter(status=status_filter)
         return JsonResponse({"packages": [_package_dict(p) for p in qs[:200]]})
 
     if request.method == "POST":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
         try:
             body = json.loads(request.body)
         except Exception:
@@ -1447,8 +2198,11 @@ def factory_packages_list(request):
 
 @login_required
 def factory_package_detail(request, package_id):
-    """GET /api/v1/factory/packages/<uuid:id>/ — retrieve a package."""
-    from controlplane.models import AgentFactoryPackage
+    """
+    GET    /api/v1/factory/packages/<uuid:id>/ — retrieve a package
+    DELETE /api/v1/factory/packages/<uuid:id>/ — delete a package
+    """
+    from controlplane.models import AgentFactoryPackage, AuditLog
 
     try:
         pkg = (AgentFactoryPackage.objects
@@ -1456,5 +2210,29 @@ def factory_package_detail(request, package_id):
                .get(id=package_id))
     except AgentFactoryPackage.DoesNotExist:
         return JsonResponse({"error": "Not found."}, status=404)
+    if not _can_access_business_unit(request.user, _package_business_unit_id(pkg)):
+        return JsonResponse({"error": "You do not have access to this package."}, status=403)
 
-    return JsonResponse(_package_dict(pkg))
+    if request.method == "GET":
+        return JsonResponse(_package_dict(pkg))
+
+    if request.method == "DELETE":
+        role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+        if role_error is not None:
+            return role_error
+        pkg_id_str = str(pkg.id)
+        AuditLog.objects.create(
+            actor=request.user.username,
+            action="factory_package_deleted",
+            resource_type="AgentFactoryPackage",
+            resource_id=pkg_id_str,
+            payload={
+                "package_id": pkg.package_id,
+                "status": pkg.status,
+                "sandbox_agent_id": str(pkg.sandbox_agent_id) if pkg.sandbox_agent_id else None,
+            },
+        )
+        pkg.delete()
+        return JsonResponse({"deleted": True, "id": pkg_id_str}, status=200)
+
+    return JsonResponse({"error": "Method not allowed."}, status=405)

@@ -504,6 +504,9 @@
                             <td>
                               {% if agent.status == 'draft' %}
                                 <button class="button tiny primary promote-btn" type="button" data-next="review">→ Review</button>
+                                {% if agent.source_blueprint_count == 0 %}
+                                  <button class="button tiny secondary agent-delete-btn" type="button">Delete</button>
+                                {% endif %}
                               {% elif agent.status == 'review' %}
                                 <button class="button tiny primary promote-btn" type="button" data-next="pilot">→ Pilot</button>
                               {% elif agent.status == 'pilot' %}
@@ -1014,8 +1017,8 @@
         blueprintsPanel.hidden = tab !== 'blueprints';
         if (packagesPanel) packagesPanel.hidden = tab !== 'packages';
       }
-      insightsTab.addEventListener('click', () => showFactoryTab('insights'));
-      blueprintsTab.addEventListener('click', () => showFactoryTab('blueprints'));
+      insightsTab.addEventListener('click', () => { showFactoryTab('insights'); loadInsights(); });
+      blueprintsTab.addEventListener('click', () => { showFactoryTab('blueprints'); loadBlueprints(); });
       if (packagesTab) packagesTab.addEventListener('click', () => { showFactoryTab('packages'); loadPackages(); });
 
       // ── data fetching ──────────────────────────────────────────────────────
@@ -1085,11 +1088,15 @@
             <td><span class="bp-count">${i.blueprint_count}</span></td>
             <td class="action-cell">
               <button class="button tiny" data-insight-generate="${i.id}" title="Generate blueprint">Generate blueprint</button>
+              <button class="button tiny secondary" data-insight-delete="${i.id}" title="Delete insight">Delete</button>
             </td>
           </tr>`).join('');
 
         insightsTbody.querySelectorAll('[data-insight-generate]').forEach(btn => {
           btn.addEventListener('click', () => generateBlueprint(btn.dataset.insightGenerate));
+        });
+        insightsTbody.querySelectorAll('[data-insight-delete]').forEach(btn => {
+          btn.addEventListener('click', () => deleteInsight(btn.dataset.insightDelete));
         });
       }
 
@@ -1104,6 +1111,7 @@
           const riskCls   = RISK_CLASS[bp.risk_level] || '';
           const canApprove = ['draft','needs_data','needs_tool'].includes(bp.status);
           const canBuild   = bp.status === 'approved';
+          const canBuildWorkflow = !!bp.built_agent_id && Array.isArray(bp.workflow_steps) && bp.workflow_steps.length > 1;
           return `
           <tr>
             <td><strong>${esc(bp.agent_name)}</strong><br><small class="muted">v${bp.version}</small></td>
@@ -1121,6 +1129,9 @@
             <td class="action-cell">
               ${canApprove ? `<button class="button tiny primary" data-bp-approve="${bp.id}">Approve</button>` : ''}
               ${canBuild   ? `<button class="button tiny primary" data-bp-build="${bp.id}">⚙ Build agent</button>` : ''}
+              ${canBuildWorkflow ? `<button class="button tiny secondary" data-bp-build-workflow="${bp.id}">⇄ Build workflow</button>` : ''}
+              ${bp.built_agent_id ? `<button class="button tiny secondary" data-agent-id="${bp.built_agent_id}" data-promote-bindings="sandbox">→ Sandbox bindings</button><button class="button tiny secondary" data-agent-id="${bp.built_agent_id}" data-promote-bindings="live">→ Live bindings</button>` : ''}
+              <button class="button tiny secondary" data-bp-delete="${bp.id}">Delete</button>
             </td>
           </tr>`;
         }).join('');
@@ -1130,6 +1141,12 @@
         });
         blueprintsTbody.querySelectorAll('[data-bp-build]').forEach(btn => {
           btn.addEventListener('click', () => buildAgent(btn.dataset.bpBuild, btn));
+        });
+        blueprintsTbody.querySelectorAll('[data-bp-build-workflow]').forEach(btn => {
+          btn.addEventListener('click', () => buildWorkflow(btn.dataset.bpBuildWorkflow, btn));
+        });
+        blueprintsTbody.querySelectorAll('[data-bp-delete]').forEach(btn => {
+          btn.addEventListener('click', () => deleteBlueprint(btn.dataset.bpDelete));
         });
       }
 
@@ -1169,12 +1186,16 @@
             <td>${sandbox}</td>
             <td class="action-cell">
               <button class="button tiny secondary" data-pkg-detail="${p.id}" title="View validation report">Details</button>
+              <button class="button tiny secondary" data-pkg-delete="${p.id}" title="Delete package">Delete</button>
             </td>
           </tr>`;
         }).join('');
 
         packagesTbody.querySelectorAll('[data-pkg-detail]').forEach(btn => {
           btn.addEventListener('click', () => showPackageDetail(btn.dataset.pkgDetail));
+        });
+        packagesTbody.querySelectorAll('[data-pkg-delete]').forEach(btn => {
+          btn.addEventListener('click', () => deletePackage(btn.dataset.pkgDelete));
         });
       }
 
@@ -1199,8 +1220,60 @@
           if (!r.ok) { const d = await r.json(); toast(d.error || 'Failed.', true); return; }
           toast('Blueprint generated.');
           await loadInsights();
+          if (bpFilterEl) bpFilterEl.value = '';
           await loadBlueprints();
           showFactoryTab('blueprints');
+        } catch (e) { toast('Network error.', true); }
+      }
+
+      async function deleteInsight(insightId) {
+        if (!insightId) return;
+        if (!window.confirm('Delete this process insight? Linked blueprints/packages will keep their record with a null insight link.')) return;
+        try {
+          const r = await fetch(`/api/v1/factory/insights/${insightId}/`, {
+            method:'DELETE',
+            headers:{'X-CSRFToken': getCsrf()},
+          });
+          const d = await r.json();
+          if (!r.ok) { toast(d.error || 'Delete failed.', true); return; }
+          toast('Insight deleted.');
+          await loadInsights();
+          await loadBlueprints();
+          await loadPackages();
+        } catch (e) { toast('Network error.', true); }
+      }
+
+      async function deleteBlueprint(bpId) {
+        if (!bpId) return;
+        if (!window.confirm('Delete this blueprint? Any built agent will remain in the catalog.')) return;
+        try {
+          const r = await fetch(`/api/v1/factory/blueprints/${bpId}/`, {
+            method:'DELETE',
+            headers:{'X-CSRFToken': getCsrf()},
+          });
+          const d = await r.json();
+          if (!r.ok) { toast(d.error || 'Delete failed.', true); return; }
+          toast('Blueprint deleted.');
+          await loadInsights();
+          await loadBlueprints();
+          await loadPackages();
+        } catch (e) { toast('Network error.', true); }
+      }
+
+      async function deletePackage(pkgId) {
+        if (!pkgId) return;
+        if (!window.confirm('Delete this factory package record? The sandbox agent, if any, is not deleted.')) return;
+        try {
+          const r = await fetch(`/api/v1/factory/packages/${pkgId}/`, {
+            method:'DELETE',
+            headers:{'X-CSRFToken': getCsrf()},
+          });
+          const d = await r.json();
+          if (!r.ok) { toast(d.error || 'Delete failed.', true); return; }
+          toast('Package deleted.');
+          await loadPackages();
+          await loadInsights();
+          await loadBlueprints();
         } catch (e) { toast('Network error.', true); }
       }
 
@@ -1250,6 +1323,22 @@
         finally { btn.disabled = false; btn.textContent = '⚙ Build agent'; }
       }
 
+      async function buildWorkflow(bpId, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Compiling…';
+        try {
+          const r = await fetch(`/api/v1/factory/blueprints/${bpId}/build-workflow/`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+            body: JSON.stringify({ run: true }),
+          });
+          const d = await r.json();
+          if (!r.ok) { toast(d.error || 'Workflow build failed.', true); return; }
+          showWorkflowSuccessBanner(d.workflow, d.run);
+        } catch (e) { toast('Network error.', true); }
+        finally { btn.disabled = false; btn.textContent = '⇄ Build workflow'; }
+      }
+
       function showBuildSuccessBanner(agentName) {
         const existing = document.getElementById('buildSuccessBanner');
         if (existing) existing.remove();
@@ -1269,6 +1358,50 @@
         });
         banner.querySelector('.build-banner-close').addEventListener('click', () => banner.remove());
       }
+
+      function showWorkflowSuccessBanner(workflow, run) {
+        const existing = document.getElementById('workflowSuccessBanner');
+        if (existing) existing.remove();
+        const banner = document.createElement('div');
+        banner.id = 'workflowSuccessBanner';
+        banner.className = 'build-success-banner';
+        const runText = run ? ` Sandbox run ${run.status}.` : '';
+        banner.innerHTML = `
+          <span>✓ Workflow <strong>${esc(workflow.name)}</strong> compiled.${runText}</span>
+          <button class="button tiny secondary" id="closeWorkflowBanner" type="button">Dismiss</button>`;
+        blueprintsPanel.insertBefore(banner, blueprintsPanel.firstChild);
+        banner.querySelector('#closeWorkflowBanner').addEventListener('click', () => banner.remove());
+      }
+
+      document.addEventListener('click', async e => {
+        const btn = e.target.closest('[data-promote-bindings]');
+        if (!btn) return;
+        const agentId = btn.dataset.agentId;
+        const mode = btn.dataset.promoteBindings;
+        if (!agentId || !mode) return;
+        btn.disabled = true;
+        const original = btn.textContent;
+        btn.textContent = '…';
+        try {
+          const r = await fetch(`/api/v1/factory/agents/${agentId}/tool-bindings/promote/`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-CSRFToken':getCsrf()},
+            body: JSON.stringify({ mode }),
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            toast(d.error || 'Binding promotion failed.', true);
+            return;
+          }
+          toast(`Promoted ${d.bindings.length} bindings to ${mode}.`);
+          loadBlueprints();
+        } catch (err) {
+          toast('Network error.', true);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = original;
+        }
+      });
 
       // ── catalog promote ───────────────────────────────────────────────────
       const PROMOTE_LABELS = {
@@ -1335,6 +1468,38 @@
           toast('Network error.', true);
           btn.disabled = false;
           btn.textContent = origText;
+        }
+      });
+
+      document.getElementById('agents').addEventListener('click', async (e) => {
+        const btn = e.target.closest('.agent-delete-btn');
+        if (!btn) return;
+        const row = btn.closest('tr');
+        const agentId = row && row.dataset ? row.dataset.agentId : null;
+        if (!agentId) return;
+        if (!window.confirm('Delete this draft agent from the catalog?')) return;
+        btn.disabled = true;
+        const original = btn.textContent;
+        btn.textContent = 'Deleting…';
+        try {
+          const r = await fetch(`/api/v1/agents/${agentId}/`, {
+            method: 'DELETE',
+            headers: { 'X-CSRFToken': getCsrf() },
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            toast(d.error || 'Delete failed.', true);
+            btn.disabled = false;
+            btn.textContent = original;
+            return;
+          }
+          row.remove();
+          toast('Draft agent deleted.');
+          window.location.reload();
+        } catch (err) {
+          toast('Network error.', true);
+          btn.disabled = false;
+          btn.textContent = original;
         }
       });
 
@@ -1576,7 +1741,7 @@
             toast('Package ingested. ' + created);
             closePackageModalFn();
             showFactoryTab('packages');
-            loadPackages();
+            await Promise.all([loadPackages(), loadInsights(), loadBlueprints()]);
           } catch (e) {
             packageError.textContent = 'Network error.';
             packageError.hidden = false;

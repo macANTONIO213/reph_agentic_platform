@@ -276,6 +276,7 @@ class PackageIngestor:
     def _create_blueprint(self, pkg: dict, insight, package):
         """Persist the proposed agent design and its approval gate (never approved)."""
         from controlplane.models import AgentBlueprint
+        from controlplane.services.factory import opportunity_scorer
 
         bp_src   = pkg.get("agent_blueprint", {}) or {}
         manifest = pkg.get("agent_build_manifest", {}) or {}
@@ -306,6 +307,25 @@ class PackageIngestor:
 
         version = AgentBlueprint.objects.filter(insight=insight).count() + 1 if insight else 1
 
+        scored = opportunity_scorer.score(insight) if insight is not None else {
+            "business_value_score": 5,
+            "automation_fit_score": 4,
+            "complexity_score": 5,
+            "risk_score": 2,
+            "opportunity_score": 5.0,
+        }
+        business_value_score = self._clamp(bp_src.get("business_value", scored["business_value_score"]))
+        automation_fit_score = self._clamp(scored["automation_fit_score"])
+        complexity_score = self._clamp(scored["complexity_score"])
+        risk_score = self._clamp(scored["risk_score"])
+        opportunity_score = round(
+            business_value_score * 0.35
+            + automation_fit_score * 0.35
+            + (10 - complexity_score) * 0.20
+            + (10 - risk_score) * 0.10,
+            2,
+        )
+
         blueprint = AgentBlueprint.objects.create(
             insight               = insight,
             version               = version,
@@ -323,7 +343,11 @@ class PackageIngestor:
             missing_data          = missing_data,
             status                = status,
             risk_level            = risk_level,
-            business_value_score  = self._clamp(bp_src.get("business_value", 5)),
+            business_value_score  = business_value_score,
+            automation_fit_score  = automation_fit_score,
+            complexity_score      = complexity_score,
+            risk_score            = risk_score,
+            opportunity_score     = opportunity_score,
         )
         return blueprint
 

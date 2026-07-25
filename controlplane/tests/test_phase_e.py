@@ -8,6 +8,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import Client, TestCase
 from django.utils import timezone
 
@@ -388,15 +389,16 @@ class WorkflowApiTests(TestCase):
             workflow=self.wf, step_name="step1", agent=self.agent,
             depends_on=[], input_template="test", order=0,
         )
-        with patch("controlplane.services.orchestrator.OrchestratorService.execute"):
-            resp = self.client.post(
-                f"/api/v1/workflows/{self.wf.id}/run/",
-                data=json.dumps({"inputs": {"topic": "revenue"}}),
-                content_type="application/json",
-            )
+        resp = self.client.post(
+            f"/api/v1/workflows/{self.wf.id}/run/",
+            data=json.dumps({"inputs": {"topic": "revenue"}}),
+            content_type="application/json",
+        )
         self.assertEqual(resp.status_code, 202)
         data = json.loads(resp.content)
         self.assertIn("workflow_run_id", data)
+        run = WorkflowRun.objects.get(id=data["workflow_run_id"])
+        self.assertEqual(run.status, WorkflowRun.Status.PENDING)
 
     def test_workflow_run_detail(self):
         run = WorkflowRun.objects.create(
@@ -415,6 +417,35 @@ class WorkflowApiTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         self.assertIn("tasks", data)
+
+    def test_workflow_detail_forbidden_for_foreign_bu(self):
+        own_bu = _make_bu("Own BU")
+        other_bu = _make_bu("Other BU")
+        user = _make_user("viewer-wf", staff=False)
+        user.profile.role = "viewer"
+        user.profile.business_unit = own_bu
+        user.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(user)
+        foreign_wf = _make_workflow("foreign-wf", bu=other_bu)
+        resp = self.client.get(f"/api/v1/workflows/{foreign_wf.id}/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_workflow_run_detail_forbidden_for_foreign_bu(self):
+        own_bu = _make_bu("Own BU 2")
+        other_bu = _make_bu("Other BU 2")
+        user = _make_user("viewer-run", staff=False)
+        user.profile.role = "viewer"
+        user.profile.business_unit = own_bu
+        user.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(user)
+        foreign_wf = _make_workflow("foreign-run-wf", bu=other_bu)
+        run = WorkflowRun.objects.create(
+            workflow=foreign_wf,
+            status=WorkflowRun.Status.COMPLETED,
+            triggered_by="someone-else",
+        )
+        resp = self.client.get(f"/api/v1/workflow-runs/{run.id}/")
+        self.assertEqual(resp.status_code, 403)
 
 
 class SharedMemoryApiTests(TestCase):
@@ -459,3 +490,29 @@ class ModelRouteApiTests(TestCase):
         data = json.loads(resp.content)
         self.assertIn("model_id", data)
         self.assertIn("risk_tier", data)
+
+
+class WorkflowQueueWorkerTests(TestCase):
+
+    def setUp(self):
+        self.bu = _make_bu("Queue BU")
+        self.agent = _make_agent("queue-agent", bu=self.bu)
+        self.wf = _make_workflow("queue-wf", bu=self.bu)
+        WorkflowTask.objects.create(
+            workflow=self.wf,
+            step_name="step1",
+            agent=self.agent,
+            depends_on=[],
+            input_template="queue test",
+            order=0,
+        )
+
+    def test_worker_command_processes_pending_runs(self):
+        from controlplane.services.workflow_queue import workflow_queue
+        run = workflow_queue.enqueue(self.wf, inputs={"x": 1}, triggered_by="tester")
+        self.assertEqual(run.status, WorkflowRun.Status.PENDING)
+        with patch("controlplane.services.orchestrator.OrchestratorService.execute") as exec_mock:
+            exec_mock.side_effect = lambda wf_run: wf_run
+            call_command("process_workflow_runs", once=True, limit=5)
+        run.refresh_from_db()
+        self.assertEqual(run.status, WorkflowRun.Status.RUNNING)

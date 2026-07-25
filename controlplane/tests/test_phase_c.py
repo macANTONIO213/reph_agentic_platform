@@ -8,7 +8,7 @@ import math
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 
 from controlplane.models import (
     Agent,
@@ -246,6 +246,26 @@ class SqlConnectorTests(TestCase):
     def test_create_table_raises(self):
         self._assert_blocked("CREATE TABLE foo (id INT)")
 
+    @override_settings(CONNECTOR_CIRCUIT_BREAKER_FAILURE_THRESHOLD=2, CONNECTOR_CIRCUIT_BREAKER_COOLDOWN_SECONDS=60)
+    @patch("sqlalchemy.create_engine")
+    def test_circuit_breaker_opens_after_threshold(self, mock_create_engine):
+        from controlplane.services.connectors.sql_connector import SqlConnector, SqlConnectorError
+        dc = DataConnector.objects.create(
+            name="CB SQL",
+            connector_type="sql",
+            business_unit=_make_bu(),
+            config={"url": "sqlite:///unused.db"},
+            is_active=True,
+        )
+        mock_create_engine.side_effect = RuntimeError("db down")
+        connector = SqlConnector(dc)
+        with self.assertRaises(SqlConnectorError):
+            connector.query("SELECT 1", actor="test")
+        with self.assertRaises(SqlConnectorError):
+            connector.query("SELECT 1", actor="test")
+        with self.assertRaises(SqlConnectorError):
+            connector.query("SELECT 1", actor="test")
+
 
 # ---------------------------------------------------------------------------
 # C3 — RestConnector
@@ -280,6 +300,19 @@ class RestConnectorTests(TestCase):
     def test_build_url_strips_double_slash(self):
         conn = self._make_connector("https://api.example.com/")
         self.assertEqual(conn._build_url("/data"), "https://api.example.com/data")
+
+    @override_settings(CONNECTOR_CIRCUIT_BREAKER_FAILURE_THRESHOLD=2, CONNECTOR_CIRCUIT_BREAKER_COOLDOWN_SECONDS=60)
+    @patch("urllib.request.urlopen")
+    def test_circuit_breaker_opens_after_threshold(self, mock_urlopen):
+        from controlplane.services.connectors.rest_connector import RestConnectorError
+        mock_urlopen.side_effect = RuntimeError("upstream down")
+        conn = self._make_connector("https://api.example.com")
+        with self.assertRaises(RestConnectorError):
+            conn.get("/v1/a")
+        with self.assertRaises(RestConnectorError):
+            conn.get("/v1/b")
+        with self.assertRaises(RestConnectorError):
+            conn.get("/v1/c")
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +410,22 @@ class KnowledgeApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_knowledge_retrieve_blocks_foreign_agent_scope(self):
+        own_bu = _make_bu("Own")
+        other_bu = _make_bu("Other")
+        user = _make_user("viewer", staff=False)
+        user.profile.role = "viewer"
+        user.profile.business_unit = own_bu
+        user.profile.save(update_fields=["role", "business_unit"])
+        self.client.force_login(user)
+        foreign_agent = _make_agent("foreign-agent", bu=other_bu)
+        resp = self.client.post(
+            "/api/v1/knowledge/retrieve/",
+            data=json.dumps({"query": "x", "agent_id": str(foreign_agent.id)}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 403)
 
     @patch("controlplane.services.rag.RagService.ingest_text")
     def test_knowledge_ingest_plain_text(self, mock_ingest):

@@ -1,6 +1,7 @@
 import uuid
 
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
@@ -659,6 +660,81 @@ class DataConnector(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.connector_type})"
+
+
+class RemoteMcpServer(models.Model):
+    """
+    A registered external MCP (Model Context Protocol) server — Phase 1 interop.
+
+    The MCP analogue of :class:`DataConnector`: a governed, BU-scoped endpoint whose
+    tools an agent can consume once bound.  Introspected via MCP ``tools/list`` and
+    called via ``tools/call`` (see ``services/interop/mcp_client.py``).  Like a
+    connector, ``config``/``auth_ref`` hold **references** to secrets, never the
+    secret itself, and ``base_url`` is SSRF-guarded on every call.
+    """
+    class Status(models.TextChoices):
+        REGISTERED = "registered", "Registered"   # known, not yet introspected
+        ACTIVE     = "active",     "Active"        # tools/list succeeded, catalog cached
+        DISABLED   = "disabled",   "Disabled"
+
+    class Transport(models.TextChoices):
+        HTTP = "http", "Streamable HTTP"
+        SSE  = "sse",  "HTTP + SSE"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120)
+    business_unit = models.ForeignKey(
+        "BusinessUnit", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="mcp_servers",
+    )
+    base_url = models.URLField(help_text="MCP endpoint. SSRF-guarded on every call.")
+    transport = models.CharField(
+        max_length=8, choices=Transport.choices, default=Transport.HTTP,
+    )
+    auth_ref = models.CharField(
+        max_length=200, blank=True,
+        help_text="Reference to a secret (e.g. env-var name). NEVER the raw secret.",
+    )
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.REGISTERED,
+    )
+    source = models.CharField(
+        max_length=20, default="manual",
+        help_text="How this server was registered: manual | public_registry | scanner.",
+    )
+    tool_catalog = models.JSONField(
+        default=list, blank=True,
+        help_text="Cached, normalised tools/list result: [{name, description, input_schema}].",
+    )
+    catalog_synced_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        # A server name is unique within a business unit (mirrors connector scoping).
+        unique_together = [("business_unit", "name")]
+
+    def __str__(self):
+        return f"{self.name} [MCP:{self.status}]"
+
+    @property
+    def is_usable(self) -> bool:
+        """True when the server is active, enabled, and has a cached catalog."""
+        return (
+            self.is_active
+            and self.status == self.Status.ACTIVE
+            and bool(self.tool_catalog)
+        )
+
+    def tool_schema(self, mcp_tool_name: str) -> dict | None:
+        """Return the cached input schema for one remote tool, or None."""
+        for tool in self.tool_catalog or []:
+            if isinstance(tool, dict) and tool.get("name") == mcp_tool_name:
+                return tool.get("input_schema") or {}
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1358,7 +1434,17 @@ class AgentToolBinding(models.Model):
     connector = models.ForeignKey(
         "DataConnector", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="tool_bindings",
-        help_text="Live target. Null until a real connector is attached.",
+        help_text="Live target for a connector-backed tool. Null for an MCP tool.",
+    )
+    # Phase 1 interop: a binding targets EITHER a DataConnector OR a RemoteMcpServer.
+    mcp_server = models.ForeignKey(
+        "RemoteMcpServer", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="tool_bindings",
+        help_text="Live target for an MCP-backed tool. Null for a connector tool.",
+    )
+    mcp_tool_name = models.CharField(
+        max_length=120, blank=True,
+        help_text="Name of the tool on the remote MCP server (may differ from tool_name).",
     )
     binding_status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.PROPOSED,
@@ -1390,6 +1476,31 @@ class AgentToolBinding(models.Model):
         return f"{self.agent_id}:{self.tool_name} [{self.binding_status}]"
 
     @property
+    def target_kind(self) -> str:
+        """'connector', 'mcp', or 'none' — which live target this binding points at."""
+        if self.mcp_server_id is not None:
+            return "mcp"
+        if self.connector_id is not None:
+            return "connector"
+        return "none"
+
+    def clean(self):
+        """
+        Enforce the either/or target invariant:
+          - a binding may target a connector OR an mcp_server, never both;
+          - once past PROPOSED (i.e. sandbox/live) it must have exactly one target.
+        A PROPOSED binding may have no target yet (declared but not wired).
+        """
+        if self.connector_id is not None and self.mcp_server_id is not None:
+            raise ValidationError(
+                "A tool binding cannot target both a DataConnector and an MCP server."
+            )
+        if self.binding_status != self.Status.PROPOSED and self.target_kind == "none":
+            raise ValidationError(
+                f"A {self.binding_status} binding must have a connector or MCP target."
+            )
+
+    @property
     def is_executable(self) -> bool:
         """Sandbox and live bindings are executable; proposed is not."""
         return self.binding_status in (self.Status.SANDBOX, self.Status.LIVE)
@@ -1408,6 +1519,130 @@ class AgentToolBinding(models.Model):
         return "live" if self.is_live_authorized() else "sandbox"
 
 
+class AgentCard(models.Model):
+    """
+    A2A agent card projected from an :class:`Agent` — Phase 1 interop.
+
+    A denormalised, cacheable JSON-RPC 2.0 agent-card document that lets external
+    systems (including MuleSoft Agent Fabric) discover and call this agent.  Stored
+    (not computed per request) so it can be versioned and served fast.
+
+    Governance gate: only a card with ``is_published=True`` is exposed on the A2A
+    discovery surface, and only pilot/production agents may be published — a
+    draft/sandbox agent is never externally discoverable.  The card carries an
+    ``x-governance`` block so our governance depth is visible to consumers.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.OneToOneField(
+        Agent, on_delete=models.CASCADE, related_name="a2a_card",
+    )
+    card_json = models.JSONField(
+        default=dict, blank=True,
+        help_text="The full A2A agent-card document served at the card endpoint.",
+    )
+    is_published = models.BooleanField(
+        default=False,
+        help_text="Only published cards are discoverable/invocable over A2A.",
+    )
+    version = models.CharField(
+        max_length=20, blank=True, default="",
+        help_text="Agent.version captured at publish time.",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        state = "published" if self.is_published else "unpublished"
+        return f"AgentCard<{self.agent_id}> [{state}]"
+
+
+class AsyncAgentTask(models.Model):
+    """
+    Durable record of a single asynchronous agent invocation — Phase 0.
+
+    This is the long-running task primitive that Phase 1 A2A ``message/send``
+    invokes: a caller submits a task, a worker runs the agent through
+    ``PlatformAgentRuntime`` (so guardrails, telemetry, pricing and the AgentRun
+    record all happen), and the caller polls this row for the result.  Because it
+    is persisted, an invocation survives worker restarts and is observable
+    independently of any HTTP connection.
+
+    States are aligned to the A2A task lifecycle so the row maps 1:1 onto an A2A
+    task object in Phase 1:
+      submitted → working → completed | failed | canceled
+    """
+    class State(models.TextChoices):
+        SUBMITTED = "submitted", "Submitted"   # durably queued, not yet started
+        WORKING   = "working",   "Working"     # a worker is executing the agent
+        COMPLETED = "completed", "Completed"
+        FAILED    = "failed",    "Failed"
+        CANCELED  = "canceled",  "Canceled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    agent = models.ForeignKey(
+        Agent, on_delete=models.CASCADE, related_name="async_tasks",
+    )
+    # The AgentRun created when the task executes (null until a worker starts it).
+    run = models.ForeignKey(
+        AgentRun, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="async_tasks",
+    )
+    state = models.CharField(
+        max_length=12, choices=State.choices, default=State.SUBMITTED,
+    )
+    # A2A groups related tasks under a contextId; free-form for now.
+    context_id = models.CharField(max_length=120, blank=True, default="")
+    channel = models.CharField(max_length=40, default="a2a")
+    # Identity of the caller (external A2A consumer, workflow, or user label).
+    submitted_by = models.CharField(max_length=160, default="system")
+    input_message = models.TextField()
+    output_text = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
+
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+    started_at   = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["state", "created_at"])]
+
+    def __str__(self):
+        return f"AsyncAgentTask {self.id} [{self.state}]"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in (self.State.COMPLETED, self.State.FAILED, self.State.CANCELED)
+
+    def mark_working(self, run=None) -> None:
+        self.state = self.State.WORKING
+        self.started_at = self.started_at or timezone.now()
+        if run is not None:
+            self.run = run
+        self.save(update_fields=["state", "started_at", "run", "updated_at"])
+
+    def mark_completed(self, output_text: str, run=None) -> None:
+        self.state = self.State.COMPLETED
+        self.output_text = output_text or ""
+        if run is not None:
+            self.run = run
+        self.completed_at = timezone.now()
+        self.save(update_fields=[
+            "state", "output_text", "run", "completed_at", "updated_at",
+        ])
+
+    def mark_failed(self, error: str) -> None:
+        self.state = self.State.FAILED
+        self.error = (error or "")[:4000]
+        self.completed_at = timezone.now()
+        self.save(update_fields=["state", "error", "completed_at", "updated_at"])
+
+
 class AuditLog(models.Model):
     """Append-only record of every privileged action on the platform."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1424,3 +1659,12 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"{self.actor} · {self.action} · {self.created_at:%Y-%m-%d %H:%M}"
+
+    def save(self, *args, **kwargs):
+        # Immutable append-only ledger: existing rows cannot be modified.
+        if self.pk and AuditLog.objects.filter(pk=self.pk).exists():
+            raise ValueError("AuditLog is append-only and cannot be updated.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("AuditLog is append-only and cannot be deleted.")

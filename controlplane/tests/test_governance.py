@@ -4,12 +4,26 @@ GovernanceService unit tests.
 Run with:  python manage.py test controlplane.tests.test_governance
 """
 from datetime import timedelta
+import json
+from io import StringIO
 
 from django.contrib.auth.models import Group, User
+from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 
-from controlplane.models import Agent, Approval, AuditLog, GovernanceReview
+from controlplane.models import (
+    Agent,
+    AgentRun,
+    Approval,
+    AuditLog,
+    ConversationSession,
+    EvalRun,
+    EvalSuite,
+    GovernanceReview,
+    OtelSpan,
+    TelemetryEvent,
+)
 from controlplane.services.governance import (
     GovernanceService,
     RegistrationError,
@@ -236,3 +250,187 @@ class RecordApprovalTests(TestCase):
         self.assertTrue(
             AuditLog.objects.filter(action="agent.approved", resource_type="Approval").exists()
         )
+
+
+class VersionChangeControlTests(TestCase):
+    def setUp(self):
+        self.actor = _make_user("platform-admin", is_staff=True)
+        self.agent = governance.register_agent(actor=self.actor, data=_minimal_data(name="Prod Agent"))
+        governance.transition(actor=self.actor, agent=self.agent, to_status=Agent.Status.REVIEW)
+        governance.transition(actor=self.actor, agent=self.agent, to_status=Agent.Status.PILOT)
+        GovernanceReview.objects.create(
+            agent=self.agent,
+            reviewer=self.actor.username,
+            status=GovernanceReview.Status.APPROVED,
+        )
+        Approval.objects.create(
+            agent=self.agent,
+            approved_by=self.actor,
+            approved_by_username=self.actor.username,
+            scope="tier4_execution",
+            expires_at=timezone.now() + timedelta(hours=8),
+        )
+        governance.transition(actor=self.actor, agent=self.agent, to_status=Agent.Status.PRODUCTION)
+
+    def _create_active_suite(self):
+        return EvalSuite.objects.create(agent=self.agent, name="prod-suite", is_active=True, pass_threshold=80)
+
+    def test_create_version_blocks_production_change_without_change_control_approval(self):
+        with self.assertRaises(TransitionError):
+            governance.create_version(
+                actor=self.actor,
+                agent=self.agent,
+                manifest={"version": "2.0", "model_id": "gpt-4o"},
+            )
+
+    def test_create_version_allows_with_change_control_approval_and_recent_eval_pass(self):
+        suite = self._create_active_suite()
+        EvalRun.objects.create(
+            suite=suite,
+            status=EvalRun.Status.COMPLETE,
+            passed=True,
+            total_cases=1,
+            passed_cases=1,
+            pass_rate=100,
+        )
+        Approval.objects.create(
+            agent=self.agent,
+            approved_by=self.actor,
+            approved_by_username=self.actor.username,
+            scope="model_change",
+            expires_at=timezone.now() + timedelta(hours=8),
+        )
+        version = governance.create_version(
+            actor=self.actor,
+            agent=self.agent,
+            manifest={"version": "2.0", "model_id": "gpt-4o"},
+        )
+        self.assertEqual(version.version, "2.0")
+
+    def test_create_version_blocks_when_only_stale_eval_pass_exists(self):
+        suite = self._create_active_suite()
+        stale = EvalRun.objects.create(
+            suite=suite,
+            status=EvalRun.Status.COMPLETE,
+            passed=True,
+            total_cases=1,
+            passed_cases=1,
+            pass_rate=100,
+        )
+        EvalRun.objects.filter(pk=stale.pk).update(executed_at=timezone.now() - timedelta(days=45))
+        Approval.objects.create(
+            agent=self.agent,
+            approved_by=self.actor,
+            approved_by_username=self.actor.username,
+            scope="model_change",
+            expires_at=timezone.now() + timedelta(hours=8),
+        )
+        with self.assertRaises(TransitionError):
+            governance.create_version(
+                actor=self.actor,
+                agent=self.agent,
+                manifest={"version": "2.0", "model_id": "gpt-4o"},
+            )
+
+
+class ComplianceTrustCommandTests(TestCase):
+    def setUp(self):
+        self.actor = _make_user("compliance-admin", is_staff=True)
+        self.agent = governance.register_agent(actor=self.actor, data=_minimal_data(name="Audit Agent"))
+
+    def test_audit_log_is_append_only(self):
+        log = AuditLog.objects.create(
+            actor=self.actor.username,
+            action="audit.check",
+            resource_type="Agent",
+            resource_id=str(self.agent.id),
+            payload={},
+        )
+        log.action = "audit.modified"
+        with self.assertRaises(ValueError):
+            log.save()
+        with self.assertRaises(ValueError):
+            log.delete()
+
+    def test_export_compliance_evidence_emits_json(self):
+        out = StringIO()
+        call_command("export_compliance_evidence", "--days", "7", stdout=out)
+        payload = json.loads(out.getvalue())
+        self.assertIn("controls", payload)
+        self.assertIn("audit_integrity", payload["controls"])
+
+    def test_enforce_retention_dry_run_does_not_delete_data(self):
+        run = AgentRun.objects.create(agent=self.agent, input_text="hello")
+        TelemetryEvent.objects.create(agent=self.agent, run=run, event_type="run.started", actor="tester")
+        span = OtelSpan.objects.create(
+            trace_id="0123456789abcdef0123456789abcdef",
+            span_id="0123456789abcdef",
+            name="test",
+            start_time=timezone.now() - timedelta(days=10),
+            end_time=timezone.now() - timedelta(days=10),
+            duration_ms=1,
+            agent=self.agent,
+            run=run,
+        )
+        session = ConversationSession.objects.create(agent=self.agent, user_label="tester", messages=[])
+
+        TelemetryEvent.objects.update(created_at=timezone.now() - timedelta(days=10))
+        AgentRun.objects.update(started_at=timezone.now() - timedelta(days=10))
+        ConversationSession.objects.update(created_at=timezone.now() - timedelta(days=10))
+        OtelSpan.objects.filter(pk=span.pk).update(start_time=timezone.now() - timedelta(days=10))
+
+        call_command(
+            "enforce_retention",
+            "--dry-run",
+            "--telemetry-days",
+            "1",
+            "--spans-days",
+            "1",
+            "--sessions-days",
+            "1",
+            "--runs-days",
+            "1",
+        )
+        self.assertEqual(TelemetryEvent.objects.count(), 1)
+        self.assertEqual(AgentRun.objects.count(), 1)
+        self.assertEqual(ConversationSession.objects.count(), 1)
+        self.assertEqual(OtelSpan.objects.count(), 1)
+
+    def test_enforce_retention_deletes_and_audits(self):
+        run = AgentRun.objects.create(agent=self.agent, input_text="hello")
+        TelemetryEvent.objects.create(agent=self.agent, run=run, event_type="run.started", actor="tester")
+        OtelSpan.objects.create(
+            trace_id="fedcba9876543210fedcba9876543210",
+            span_id="fedcba9876543210",
+            name="test",
+            start_time=timezone.now() - timedelta(days=10),
+            end_time=timezone.now() - timedelta(days=10),
+            duration_ms=1,
+            agent=self.agent,
+            run=run,
+        )
+        ConversationSession.objects.create(agent=self.agent, user_label="tester", messages=[])
+
+        TelemetryEvent.objects.update(created_at=timezone.now() - timedelta(days=10))
+        AgentRun.objects.update(started_at=timezone.now() - timedelta(days=10))
+        ConversationSession.objects.update(created_at=timezone.now() - timedelta(days=10))
+        OtelSpan.objects.update(start_time=timezone.now() - timedelta(days=10))
+
+        call_command(
+            "enforce_retention",
+            "--actor",
+            self.actor.username,
+            "--telemetry-days",
+            "1",
+            "--spans-days",
+            "1",
+            "--sessions-days",
+            "1",
+            "--runs-days",
+            "1",
+        )
+        self.assertEqual(TelemetryEvent.objects.count(), 0)
+        self.assertEqual(AgentRun.objects.count(), 0)
+        self.assertEqual(ConversationSession.objects.count(), 0)
+        self.assertEqual(OtelSpan.objects.count(), 0)
+        self.assertTrue(AuditLog.objects.filter(action="retention.enforced").exists())
