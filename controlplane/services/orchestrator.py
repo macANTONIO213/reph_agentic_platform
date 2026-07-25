@@ -29,8 +29,10 @@ import json as _json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -167,11 +169,21 @@ class OrchestratorService:
 
                 for task in ready:
                     pending.discard(task.step_name)
-                    success = self._execute_task(workflow_run, task)
+
+                # Independent ready tasks form a wave — run them concurrently, then
+                # merge their outputs once (single writer) to avoid lost updates.
+                wave_results = self._run_wave(workflow_run, ready)
+                merged = False
+                for step_name, (success, output) in wave_results.items():
                     if success:
-                        completed_steps.add(task.step_name)
+                        completed_steps.add(step_name)
+                        if output is not None:
+                            workflow_run.outputs[step_name] = output
+                            merged = True
                     else:
-                        failed_steps.add(task.step_name)
+                        failed_steps.add(step_name)
+                if merged:
+                    workflow_run.save(update_fields=["outputs"])
 
             # Determine final status
             if failed_steps:
@@ -201,8 +213,12 @@ class OrchestratorService:
 
     # ── Task execution ────────────────────────────────────────────────────────
 
-    def _execute_task(self, workflow_run, task, attempt: int = 1) -> bool:
-        """Execute a single task.  Returns True on success, False on failure."""
+    def _execute_task(self, workflow_run, task, attempt: int = 1) -> tuple:
+        """
+        Execute a single task. Returns ``(success, output)`` — output is the parsed
+        result on success (else None). The caller merges outputs into the run
+        (single writer), so this method never writes ``workflow_run.outputs``.
+        """
         from controlplane.models import WorkflowRun, WorkflowTaskRun
         from controlplane.services.model_router import model_router
 
@@ -226,7 +242,7 @@ class OrchestratorService:
             task_run.completed_at = timezone.now()
             task_run.save(update_fields=["status", "error", "completed_at"])
             logger.warning("Task '%s' has no agent — skipping.", task.step_name)
-            return True  # Treat skipped as non-blocking
+            return True, None  # Treat skipped as non-blocking
 
         # Apply model routing
         routed_model = model_router.select(agent, task=task)
@@ -251,12 +267,8 @@ class OrchestratorService:
                 "status", "raw_output", "output", "agent_run", "completed_at"
             ])
 
-            # Store in workflow_run.outputs for downstream template substitution
-            workflow_run.outputs[task.step_name] = parsed_output
-            workflow_run.save(update_fields=["outputs"])
-
             logger.info("Task '%s' completed in workflow run %s", task.step_name, workflow_run.id)
-            return True
+            return True, parsed_output
 
         except Exception as exc:
             logger.warning(
@@ -275,10 +287,45 @@ class OrchestratorService:
             task_run.error = str(exc)
             task_run.completed_at = timezone.now()
             task_run.save(update_fields=["status", "error", "completed_at"])
-            return False
+            return False, None
 
         finally:
             agent.model_id = original_model  # Restore
+
+    # ── wave execution (parallel fan-out) ───────────────────────────────────────
+
+    def _run_wave(self, workflow_run, ready: list) -> dict:
+        """
+        Execute a wave of independent ready tasks, concurrently when enabled.
+        Returns ``{step_name: (success, output)}``.
+
+        Tasks in one wave depend only on already-completed prior waves, so they
+        read a stable ``workflow_run.outputs`` and write only their own task rows;
+        the run's outputs are merged by the single-writer caller after the wave.
+        """
+        max_par = int(getattr(settings, "ORCHESTRATOR_MAX_PARALLEL", 4))
+        if max_par <= 1 or len(ready) <= 1:
+            return {t.step_name: self._execute_task(workflow_run, t) for t in ready}
+
+        results: dict = {}
+        with ThreadPoolExecutor(max_workers=min(max_par, len(ready))) as pool:
+            futures = {pool.submit(self._execute_task_threadsafe, workflow_run, t): t for t in ready}
+            for fut in as_completed(futures):
+                task = futures[fut]
+                try:
+                    results[task.step_name] = fut.result()
+                except Exception:  # noqa: BLE001 — a worker crashed outside the task's own guard
+                    logger.exception("Wave task '%s' crashed", task.step_name)
+                    results[task.step_name] = (False, None)
+        return results
+
+    def _execute_task_threadsafe(self, workflow_run, task):
+        """Run one task in a worker thread, closing its DB connection afterward."""
+        from django.db import connection
+        try:
+            return self._execute_task(workflow_run, task)
+        finally:
+            connection.close()  # don't leak the thread-local connection back to the pool
 
     def _skip_task(self, workflow_run, task):
         from controlplane.models import WorkflowTaskRun

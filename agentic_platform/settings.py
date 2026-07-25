@@ -178,6 +178,10 @@ CELERY_TASK_ALWAYS_EAGER = (
 )
 CELERY_TASK_EAGER_PROPAGATES = True
 
+# Max independent workflow tasks the orchestrator runs concurrently per wave
+# (1 = sequential — the pre-hardening behaviour).
+ORCHESTRATOR_MAX_PARALLEL = int(os.environ.get("ORCHESTRATOR_MAX_PARALLEL", "4"))
+
 # ── Phase 1: A2A server (outbound discoverability) ────────────────────────────
 # The external A2A surface (/a2a/) is OFF by default — enable deliberately.
 A2A_SERVER_ENABLED = os.environ.get("A2A_SERVER_ENABLED", "").lower() in ("true", "1", "yes")
