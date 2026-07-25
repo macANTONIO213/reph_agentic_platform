@@ -33,6 +33,7 @@
             <button type="button" data-view-tab="monitoring">Monitoring</button>
             <button type="button" data-view-tab="catalog">Agent Catalog</button>
             <button type="button" data-view-tab="factory">Agent Factory</button>
+            <button type="button" data-view-tab="fabric">Agent Fabric</button>
           </nav>
 
           <div class="workspace">
@@ -636,6 +637,93 @@
                   <tbody id="packagesTbody">
                     <tr><td colspan="7" class="loading-cell">Switch to this tab to load.</td></tr>
                   </tbody>
+                </table>
+              </div>
+            </section>
+
+            <!-- ── Agent Fabric (federation) ─────────────────────────────── -->
+            <style>
+              .fab-console{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem}
+              .fab-console input{padding:.5rem .7rem;border:1px solid #E8E8E8;border-radius:6px;font:inherit;flex:1;min-width:200px}
+              .fab-result{margin-top:.5rem}
+              .fab-card{border:1px solid #E8E8E8;border-radius:8px;padding:.8rem 1rem;margin-bottom:.6rem;background:#fff}
+              .fab-card h4{margin:0 0 .3rem;color:#262626;font-size:.95rem}
+              .fab-pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.72rem;font-weight:600;margin-right:.3rem}
+              .fab-pill.kind{background:#FFF1E3;color:#B85C00}
+              .fab-pill.ok{background:#E7F6EC;color:#1B7A3D}
+              .fab-pill.warn{background:#FDEEEE;color:#B42318}
+              .fab-pill.muted{background:#F1F1F1;color:#666}
+              .fab-subhead{margin:1.2rem 0 .5rem;color:#3F3F3F;font-size:.85rem;text-transform:uppercase;letter-spacing:.04em}
+              .fab-scanbar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem}
+              .viz-graph{width:100%;height:320px;border:1px solid #E8E8E8;border-radius:8px;margin-bottom:1rem;background:#FAFAFA}
+              .viz-flag{color:#B42318;font-weight:600}
+            </style>
+            <section class="factory-shell platform-view" id="fabric" data-view-panel="fabric" aria-labelledby="fabric-title">
+              <header class="factory-topbar">
+                <div class="factory-title-row">
+                  <div>
+                    <span class="section-eyebrow">Governed Agent Fabric</span>
+                    <h2 id="fabric-title">Agent Fabric</h2>
+                    <p>Discover, govern, route and observe every agent — first-party, external A2A, and MCP</p>
+                  </div>
+                  <div class="factory-title-actions">
+                    <button class="button secondary small" id="fabRefresh" type="button" title="Refresh">↻ Refresh</button>
+                    <button class="button secondary" id="fabSyncBtn" type="button">⟳ Sync registry</button>
+                  </div>
+                </div>
+                <nav class="factory-tabs" aria-label="Fabric tabs">
+                  <button id="fabRegistryTab" class="factory-tab active" type="button">Registry <span class="tab-badge" id="fabRegistryCount">0</span></button>
+                  <button id="fabScannersTab" class="factory-tab" type="button">Scanners <span class="tab-badge" id="fabDiscoveredCount">0</span></button>
+                  <button id="fabBrokerTab" class="factory-tab" type="button">Broker</button>
+                  <button id="fabVizTab" class="factory-tab" type="button">Visualizer</button>
+                </nav>
+              </header>
+
+              <!-- Registry panel -->
+              <div id="fabRegistryPanel" class="factory-panel">
+                <div class="factory-filter-row">
+                  <input id="fabRegistrySearch" class="factory-filter-select" type="search" placeholder="Search name / capability…" style="min-width:220px">
+                  <select id="fabRegistryKind" class="factory-filter-select">
+                    <option value="">All kinds</option>
+                    <option value="first_party_agent">First-party agents</option>
+                    <option value="external_a2a_agent">External A2A</option>
+                    <option value="mcp_server">MCP servers</option>
+                  </select>
+                  <button class="button secondary small" id="fabRegisterExtBtn" type="button">+ Register external agent</button>
+                </div>
+                <table class="factory-table">
+                  <thead><tr><th>Name</th><th>Kind</th><th>Domain</th><th>Capabilities</th><th>Risk</th><th>Status</th><th>Source</th></tr></thead>
+                  <tbody id="fabRegistryTbody"><tr><td colspan="7" class="loading-cell">Click "Agent Fabric" to load.</td></tr></tbody>
+                </table>
+              </div>
+
+              <!-- Scanners panel -->
+              <div id="fabScannersPanel" class="factory-panel" hidden>
+                <div class="fab-scanbar" id="fabScanBar"><span class="loading-cell">Loading scanners…</span></div>
+                <h3 class="fab-subhead">Pending review — discovered by scanners</h3>
+                <table class="factory-table">
+                  <thead><tr><th>Name</th><th>Platform</th><th>Model</th><th>Capabilities</th><th></th></tr></thead>
+                  <tbody id="fabDiscoveredTbody"><tr><td colspan="5" class="loading-cell">Switch to this tab to load.</td></tr></tbody>
+                </table>
+              </div>
+
+              <!-- Broker panel -->
+              <div id="fabBrokerPanel" class="factory-panel" hidden>
+                <div class="fab-console">
+                  <input id="fabBrokerIntent" type="text" placeholder="Describe what you need — e.g. run a revenue forecast">
+                  <input id="fabBrokerDomain" type="text" placeholder="domain (optional)" style="flex:0 0 160px;min-width:120px">
+                  <button class="button secondary" id="fabBrokerRouteBtn" type="button">Route</button>
+                  <button class="button primary" id="fabBrokerExecBtn" type="button">Route &amp; execute</button>
+                </div>
+                <div id="fabBrokerResult" class="fab-result"></div>
+              </div>
+
+              <!-- Visualizer panel -->
+              <div id="fabVizPanel" class="factory-panel" hidden>
+                <div id="fabVizGraph" class="viz-graph"></div>
+                <table class="factory-table">
+                  <thead><tr><th>Agent</th><th>Calls</th><th>Avg latency (ms)</th><th>Success %</th><th>Flags</th></tr></thead>
+                  <tbody id="fabVizTbody"><tr><td colspan="5" class="loading-cell">Switch to this tab to load.</td></tr></tbody>
                 </table>
               </div>
             </section>
@@ -1791,6 +1879,201 @@
         setTimeout(() => el.classList.remove('show'), 3000);
       }
       const approveSubmitBtn = document.getElementById('approveSubmitBtn');
+    })();
+    </script>
+
+    <!-- ── Agent Fabric operator UI ─────────────────────────────────────── -->
+    <script>
+    (function () {
+      const section = document.getElementById('fabric');
+      if (!section) return;
+
+      // ── helpers ──────────────────────────────────────────────────────────
+      function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+      function csrf(){const el=document.querySelector('[name=csrfmiddlewaretoken]');return el?el.value:'';}
+      function toast(msg,err){const el=document.getElementById('toast');if(!el){return;}el.textContent=msg;el.className='toast'+(err?' toast--error':'');el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000);}
+      async function jget(url){const r=await fetch(url);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+      async function jpost(url,body){
+        const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},body:body?JSON.stringify(body):'{}'});
+        let data={};try{data=await r.json();}catch(e){}
+        if(!r.ok)throw new Error(data.error||('HTTP '+r.status));
+        return data;
+      }
+      const KIND_LABEL={first_party_agent:'First-party',external_a2a_agent:'External A2A',mcp_server:'MCP server'};
+      function capCount(c){return Array.isArray(c)?c.length:0;}
+
+      // ── sub-tab switching ────────────────────────────────────────────────
+      const tabs=[['fabRegistryTab','fabRegistryPanel',loadRegistry],
+                  ['fabScannersTab','fabScannersPanel',loadScanners],
+                  ['fabBrokerTab','fabBrokerPanel',null],
+                  ['fabVizTab','fabVizPanel',loadViz]];
+      tabs.forEach(([tabId,panelId,loader])=>{
+        const btn=document.getElementById(tabId);
+        if(!btn)return;
+        btn.addEventListener('click',()=>{
+          tabs.forEach(([t,p])=>{
+            document.getElementById(t).classList.toggle('active',t===tabId);
+            document.getElementById(p).hidden=(p!==panelId);
+          });
+          if(loader)loader();
+        });
+      });
+
+      // ── Registry ─────────────────────────────────────────────────────────
+      async function loadRegistry(){
+        const tb=document.getElementById('fabRegistryTbody');
+        const q=document.getElementById('fabRegistrySearch').value.trim();
+        const kind=document.getElementById('fabRegistryKind').value;
+        tb.innerHTML='<tr><td colspan="7" class="loading-cell">Loading…</td></tr>';
+        try{
+          const params=new URLSearchParams();if(q)params.set('q',q);if(kind)params.set('kind',kind);
+          const data=await jget('/api/v1/registry/?'+params.toString());
+          const rows=data.entries||[];
+          document.getElementById('fabRegistryCount').textContent=data.total!=null?data.total:rows.length;
+          if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="loading-cell">No entries.</td></tr>';return;}
+          tb.innerHTML=rows.map(e=>{
+            const risk=(e.governance&&e.governance.risk_tier!=null)?('T'+e.governance.risk_tier):'—';
+            const status=e.review_status==='approved'?'<span class="fab-pill ok">approved</span>':'<span class="fab-pill warn">'+esc(e.review_status)+'</span>';
+            return `<tr><td>${esc(e.name)}</td><td><span class="fab-pill kind">${esc(KIND_LABEL[e.kind]||e.kind)}</span></td>`
+              +`<td>${esc(e.domain||'—')}</td><td>${capCount(e.capabilities)}</td><td>${risk}</td><td>${status}</td><td>${esc(e.source)}</td></tr>`;
+          }).join('');
+        }catch(err){tb.innerHTML='<tr><td colspan="7" class="loading-cell">Failed to load.</td></tr>';toast(err.message,true);}
+      }
+      document.getElementById('fabRegistrySearch').addEventListener('input',debounce(loadRegistry,300));
+      document.getElementById('fabRegistryKind').addEventListener('change',loadRegistry);
+      document.getElementById('fabRegisterExtBtn').addEventListener('click',async()=>{
+        const url=prompt('External A2A agent card URL:');if(!url)return;
+        try{await jpost('/api/v1/registry/external/',{card_url:url.trim()});toast('External agent registered');loadRegistry();}
+        catch(err){toast(err.message,true);}
+      });
+      document.getElementById('fabSyncBtn').addEventListener('click',async()=>{
+        try{const r=await jpost('/api/v1/registry/sync/');toast(`Synced: ${r.agents} agents, ${r.mcp_servers} MCP`);loadRegistry();}
+        catch(err){toast(err.message,true);}
+      });
+      document.getElementById('fabRefresh').addEventListener('click',()=>{loadRegistry();});
+
+      // ── Scanners ─────────────────────────────────────────────────────────
+      async function loadScanners(){
+        const bar=document.getElementById('fabScanBar');
+        try{
+          const data=await jget('/api/v1/scanners/');
+          const plats=data.platforms||[];
+          bar.innerHTML=plats.length
+            ? plats.map(p=>`<button class="button secondary small fab-scan" data-plat="${esc(p)}" type="button">Scan ${esc(p)}</button>`).join('')
+            : '<span class="loading-cell">No scanners configured.</span>';
+          bar.querySelectorAll('.fab-scan').forEach(b=>b.addEventListener('click',()=>runScan(b.dataset.plat,b)));
+        }catch(err){bar.innerHTML='<span class="loading-cell">Failed to load scanners.</span>';toast(err.message,true);}
+        loadDiscovered();
+      }
+      async function runScan(plat,btn){
+        btn.disabled=true;const old=btn.textContent;btn.textContent='Scanning…';
+        try{const r=await jpost(`/api/v1/scanners/${encodeURIComponent(plat)}/scan/`);toast(`${plat}: ${r.discovered} discovered`);loadDiscovered();}
+        catch(err){toast(err.message,true);}
+        finally{btn.disabled=false;btn.textContent=old;}
+      }
+      async function loadDiscovered(){
+        const tb=document.getElementById('fabDiscoveredTbody');
+        tb.innerHTML='<tr><td colspan="5" class="loading-cell">Loading…</td></tr>';
+        try{
+          const data=await jget('/api/v1/registry/?review_status=discovered&kind=external_a2a_agent');
+          const rows=data.entries||[];
+          document.getElementById('fabDiscoveredCount').textContent=rows.length;
+          if(!rows.length){tb.innerHTML='<tr><td colspan="5" class="loading-cell">Nothing pending review.</td></tr>';return;}
+          tb.innerHTML=rows.map(e=>{
+            const model=(e.governance&&e.governance.model)||'—';
+            return `<tr data-id="${esc(e.id)}"><td>${esc(e.name)}</td><td>${esc(e.provider_org||'—')}</td><td>${esc(model)}</td>`
+              +`<td>${capCount(e.capabilities)}</td><td>`
+              +`<button class="button primary small fab-approve" data-id="${esc(e.id)}" data-s="approved" type="button">Approve</button> `
+              +`<button class="button secondary small fab-approve" data-id="${esc(e.id)}" data-s="rejected" type="button">Reject</button></td></tr>`;
+          }).join('');
+          tb.querySelectorAll('.fab-approve').forEach(b=>b.addEventListener('click',()=>review(b.dataset.id,b.dataset.s)));
+        }catch(err){tb.innerHTML='<tr><td colspan="5" class="loading-cell">Failed to load.</td></tr>';toast(err.message,true);}
+      }
+      async function review(id,status){
+        try{await jpost(`/api/v1/registry/${id}/approve/`,{status});toast('Marked '+status);loadDiscovered();}
+        catch(err){toast(err.message,true);}
+      }
+
+      // ── Broker ───────────────────────────────────────────────────────────
+      function brief(e){return `<span class="fab-pill kind">${esc(KIND_LABEL[e.kind]||e.kind)}</span> <strong>${esc(e.name)}</strong>`+(e.domain?` <span class="fab-pill muted">${esc(e.domain)}</span>`:'');}
+      async function brokerRoute(){
+        const intent=document.getElementById('fabBrokerIntent').value.trim();
+        const domain=document.getElementById('fabBrokerDomain').value.trim();
+        const box=document.getElementById('fabBrokerResult');
+        if(!intent){toast('Enter an intent',true);return;}
+        box.innerHTML='<div class="loading-cell">Routing…</div>';
+        try{
+          const r=await jpost('/api/v1/broker/route/',{intent,domain});
+          let html=r.decision?`<div class="fab-card"><h4>Best match</h4>${brief(r.decision)}</div>`:'<div class="fab-card">No match.</div>';
+          if(r.candidates&&r.candidates.length){
+            html+='<div class="fab-subhead">Ranked candidates</div>';
+            html+=r.candidates.map(c=>`<div class="fab-card">${brief(c.entry)} <span class="fab-pill muted">score ${c.score}</span></div>`).join('');
+          }
+          box.innerHTML=html;
+        }catch(err){box.innerHTML='';toast(err.message,true);}
+      }
+      async function brokerExec(){
+        const intent=document.getElementById('fabBrokerIntent').value.trim();
+        const domain=document.getElementById('fabBrokerDomain').value.trim();
+        const box=document.getElementById('fabBrokerResult');
+        if(!intent){toast('Enter an intent',true);return;}
+        box.innerHTML='<div class="loading-cell">Routing &amp; executing…</div>';
+        try{
+          const r=await jpost('/api/v1/broker/execute/',{intent,domain});
+          if(!r.routed){box.innerHTML=`<div class="fab-card"><h4>Not routed</h4>${esc(r.reason||'')}</div>`;return;}
+          box.innerHTML=`<div class="fab-card"><h4>Routed → ${esc(r.agent.name)} <span class="fab-pill ok">${esc(r.state)}</span></h4>`
+            +`<div style="white-space:pre-wrap;color:#3F3F3F;margin-top:.4rem">${esc(r.output||'(no output)')}</div></div>`;
+        }catch(err){box.innerHTML='';toast(err.message,true);}
+      }
+      document.getElementById('fabBrokerRouteBtn').addEventListener('click',brokerRoute);
+      document.getElementById('fabBrokerExecBtn').addEventListener('click',brokerExec);
+      document.getElementById('fabBrokerIntent').addEventListener('keydown',e=>{if(e.key==='Enter')brokerRoute();});
+
+      // ── Visualizer ───────────────────────────────────────────────────────
+      const NODE_FILL={agent:'#FF8200',broker:'#3F3F3F',external:'#8A8A8A'};
+      async function loadViz(){
+        const tb=document.getElementById('fabVizTbody');const g=document.getElementById('fabVizGraph');
+        tb.innerHTML='<tr><td colspan="5" class="loading-cell">Loading…</td></tr>';
+        try{
+          const data=await jget('/api/v1/visualizer/graph/?window=30');
+          drawGraph(g,data);
+          const agents=(data.nodes||[]).filter(n=>n.type==='agent');
+          if(!agents.length){tb.innerHTML='<tr><td colspan="5" class="loading-cell">No agent activity in window.</td></tr>';return;}
+          tb.innerHTML=agents.map(n=>{
+            const m=n.metrics||{};const flags=[];if(m.bottleneck)flags.push('bottleneck');if(m.at_risk)flags.push('at-risk');
+            return `<tr><td>${esc(n.label)}</td><td>${m.calls||0}</td><td>${m.avg_latency_ms||0}</td><td>${m.success_rate||0}</td>`
+              +`<td class="viz-flag">${esc(flags.join(', ')||'—')}</td></tr>`;
+          }).join('');
+        }catch(err){tb.innerHTML='<tr><td colspan="5" class="loading-cell">Failed to load.</td></tr>';toast(err.message,true);}
+      }
+      function drawGraph(container,data){
+        const nodes=data.nodes||[],edges=data.edges||[];
+        const W=container.clientWidth||800,H=320,cx=W/2,cy=H/2,R=Math.min(W,H)/2-50;
+        const pos={};
+        nodes.forEach((n,i)=>{const a=(i/Math.max(nodes.length,1))*2*Math.PI-Math.PI/2;pos[n.id]={x:cx+R*Math.cos(a),y:cy+R*Math.sin(a)};});
+        const NS='http://www.w3.org/2000/svg';
+        const svg=document.createElementNS(NS,'svg');svg.setAttribute('width','100%');svg.setAttribute('height',H);svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+        edges.forEach(e=>{const s=pos[e.source],t=pos[e.target];if(!s||!t)return;
+          const ln=document.createElementNS(NS,'line');ln.setAttribute('x1',s.x);ln.setAttribute('y1',s.y);ln.setAttribute('x2',t.x);ln.setAttribute('y2',t.y);
+          ln.setAttribute('stroke','#D0D0D0');ln.setAttribute('stroke-width',Math.min(1+(e.count||1),4));svg.appendChild(ln);});
+        nodes.forEach(n=>{const p=pos[n.id];if(!p)return;
+          const c=document.createElementNS(NS,'circle');c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',n.type==='agent'?11:9);
+          c.setAttribute('fill',NODE_FILL[n.type]||'#FF8200');c.setAttribute('stroke','#fff');c.setAttribute('stroke-width',2);
+          const title=document.createElementNS(NS,'title');title.textContent=n.label;c.appendChild(title);svg.appendChild(c);
+          const tx=document.createElementNS(NS,'text');tx.setAttribute('x',p.x);tx.setAttribute('y',p.y-16);tx.setAttribute('text-anchor','middle');
+          tx.setAttribute('font-size','11');tx.setAttribute('fill','#262626');tx.textContent=(n.label||'').slice(0,18);svg.appendChild(tx);});
+        container.innerHTML='';
+        if(!nodes.length){container.innerHTML='<div class="loading-cell" style="padding:2rem">No interactions in window.</div>';return;}
+        container.appendChild(svg);
+      }
+
+      // ── load registry when the Fabric view is first opened ────────────────
+      let loaded=false;
+      document.querySelector('[data-view-tab="fabric"]').addEventListener('click',()=>{
+        if(!loaded){loaded=true;loadRegistry();}
+      });
+
+      function debounce(fn,ms){let t;return function(){clearTimeout(t);t=setTimeout(fn,ms);};}
     })();
     </script>
   </body>

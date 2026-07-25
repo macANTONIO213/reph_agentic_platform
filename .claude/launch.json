@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "agentic-web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["manage.py", "runserver", "8790", "--noreload"],
+      "port": 8790,
+      "autoPort": false,
+      "url": "http://localhost:8790"
+    }
+  ]
+}
