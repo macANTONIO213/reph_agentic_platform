@@ -2,9 +2,18 @@
 
 > **Purpose:** Slide-by-slide deck spec for Cowork/PowerPoint. Mirrors the structure and
 > executive arc of the *Process Intelligence — Current Capabilities to Production Roadmap*
-> deck, but for the **Agentic Platform**. 23 slides, 16:9.
-> **Source of truth for content:** `PRODUCT_ROADMAP_FY26_FY27.md` (this deck is the executive
-> compression of it).
+> deck, but for the **Agentic Platform**. 25 slides, 16:9.
+> **Source of truth for content:** `PRODUCT_ROADMAP_FY26_FY27.md` +
+> `AGENT_FABRIC_TRANSFORMATION_STRATEGY.md` (this deck is the executive compression of both).
+>
+> **Refresh — 25 Jul 2026:** Since the original draft, the platform completed the **Agent Fabric
+> transformation** (Phases 0–4): it is now a MuleSoft Agent Fabric–class control plane —
+> interop (MCP + A2A), a federated agent registry, scanners, a governed broker, and a visualizer
+> — **each governance-deep**, alongside the pre-existing autonomous-build differentiator. Two
+> roadmap items that were future scope (durable execution, MCP) shipped **ahead of plan**. The
+> roadmap below is re-pointed accordingly: the remaining work is production-hardening, the
+> operator **UI surface**, and certification — not core capability. New slides **3A/3B** carry the
+> transformation narrative; delivered items are tagged **✓ DELIVERED (Jul 2026)** where they appear.
 
 ---
 
@@ -43,27 +52,63 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 ## Slide 2 — Executive recommendation
 
 - **Eyebrow:** EXECUTIVE RECOMMENDATION
-- **Title:** The control plane is built — now we harden it for scaled production
-- **Thesis:** The Agentic Platform already governs, runs, observes and *autonomously builds* enterprise AI agents end to end. The strategy is to preserve that value while replacing prototype infrastructure, proving reliability and compliance, then scaling adoption and connections.
+- **Title:** The governed Agent Fabric is built — now we harden, surface and certify it
+- **Thesis:** The Agentic Platform now does what MuleSoft Agent Fabric does — discover, orchestrate, govern and observe any AI agent — **and** it autonomously *builds* the agents Fabric can't. Every Fabric capability was delivered governance-deep (Phases 0–4, Jul 2026). The strategy is unchanged in shape but advanced in fact: preserve this differentiated layer, replace the remaining prototype infrastructure, add the operator UI, prove reliability and compliance, then scale.
 - **Three horizon cards:**
-  - **FY26 · Make it production-grade** — Durable execution, enterprise identity, secrets management, runtime-enforced quality gates, staged zero-downtime delivery.
-  - **FY27 H1 · Connect intelligence to action** — Live model routing, MCP + SaaS connectors, human-in-the-loop, HA/DR, self-service builder, advanced RAG.
+  - **FY26 · Make it production-grade** — *(durable execution ✓ delivered)* enterprise identity, secrets management, runtime-enforced quality gates, staged zero-downtime delivery; **operator UI for the Fabric surfaces**.
+  - **FY27 H1 · Connect intelligence to action** — Live model routing, *(MCP ✓ delivered)* SaaS connectors, human-in-the-loop, HA/DR, self-service builder, advanced RAG.
   - **FY27 H2 · Scale and certify** — SOC 2 Type II, Guardrails 2.0, marketplace, new channels, bi-directional platform sync, realised-ROI reporting.
-- **Ask (orange):** Approve the FY26 hardening plan now; hold FY27 expansion funding behind the *repeatable-production* gate (G2).
+- **Ask (orange):** Fund productionisation + UI of the delivered Fabric now; hold FY27 expansion funding behind the *repeatable-production* gate (G2).
 
 ---
 
 ## Slide 3 — What we have today
 
 - **Eyebrow:** WHAT WE HAVE TODAY
-- **Title:** The platform already covers the full insight-to-governed-agent chain
-- **Five numbered steps (cards):**
+- **Title:** The platform covers the full insight-to-governed-agent chain — and now federates any agent
+- **Six numbered steps (cards):**
   1. **Register** — Agents onboarded into a 4-level tenant hierarchy with risk tiers (1–4) and RBAC.
   2. **Govern** — Draft→Review→Pilot→Production→Retired lifecycle; approval tokens; immutable audit log; guardrails.
   3. **Run** — Unified multi-platform runtime (Claude / Azure OpenAI / Bedrock / HTTP) + workflow DAG orchestration.
   4. **Observe** — OpenTelemetry spans, Prometheus metrics, per-agent budget & quality-drift alerts, cost pricing.
   5. **Build (Factory)** — Process insight → scored blueprint → approval → runnable sandbox agent with governed tool bindings.
-- **Takeaway (orange):** The roadmap productionises an existing, working control plane — it does not restart product discovery.
+  6. **Federate ✓ NEW** — Interop (MCP + A2A), a searchable registry of *any* agent, scanners that auto-discover them, a governed broker that routes intent → agent, and a visualizer of every hop.
+- **Takeaway (orange):** The platform is now a governed Agent Fabric *and* an autonomous agent factory — the roadmap hardens and surfaces it, it does not restart discovery.
+
+---
+
+## Slide 3A — The strategic shift: from control plane to governed Agent Fabric
+
+- **Eyebrow:** STRATEGIC POSITION
+- **Title:** We match MuleSoft Agent Fabric — and win where it structurally can't
+- **Framing line:** MuleSoft Agent Fabric (Salesforce, Sep–Oct 2025) governs and orchestrates agents other teams built; it explicitly does **not** build agents. We closed the parity gap while keeping the one thing Fabric lacks.
+- **Parity table (Fabric pillar / Our equivalent / Our edge):**
+
+| Fabric pillar | Our equivalent | Our edge |
+|---|---|---|
+| Interop (MCP + A2A) | MCP client + A2A cards/discovery/invoke | Every call runs through the governance gate |
+| Agent Registry | Federated catalog of any agent/MCP/A2A endpoint | Provenance + governance posture on every entry |
+| Agent Scanners | Bedrock/Vertex/Agentforce crawlers | Discovered → approved gate (governed by default) |
+| Agent Broker | Intent → agent routing | Every hop executed through the governed runtime + audited |
+| Agent Visualizer | Interaction graph from the audit trail | Built from an immutable, tamper-evident record |
+| **Autonomous build** | Insight → blueprint → sandbox agent → workflow | **Unique — Fabric has nothing here** |
+
+- **Positioning line (orange):** *Every other fabric governs the agents you already have. Ours also builds the ones you're missing — sandbox-safe and fully governed.*
+
+---
+
+## Slide 3B — Delivered this cycle: the Agent Fabric transformation (Phases 0–4)
+
+- **Eyebrow:** DELIVERED · JULY 2026
+- **Title:** Five phases shipped governance-deep, each tested and on trunk
+- **Five phase cards:**
+  - **Phase 0 · Durable execution** — Celery/Redis backend behind the existing queue seam; `AsyncAgentTask` primitive. *(Was G1 scope — delivered early.)*
+  - **Phase 1 · Interop (MCP + A2A)** — Consume external MCP tools (sandbox→live, governed); agents discoverable + invocable as A2A through the runtime. *(Was G2 scope — delivered early.)*
+  - **Phase 2 · Federated registry** — One searchable catalog of first-party, external-A2A and MCP endpoints; continuous projection/sync.
+  - **Phase 3 · Scanners** — Pluggable auto-discovery (Bedrock first); scanned agents land governed, hidden until approved.
+  - **Phase 4 · Broker + Visualizer** — Governed intent→agent routing; interaction-graph data from the audit trail.
+- **Proof line (orange):** ~450 → **512 automated tests, green**; every phase committed to trunk as a self-contained, reversible unit.
+- **Honest edge (grey):** Delivered at pilot maturity — the operator **UI** and production-hardening (HA/DR, SOC 2) for these surfaces are the roadmap below.
 
 ---
 
@@ -124,21 +169,21 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 - **Eyebrow:** THE PRODUCTION GAP
 - **Title:** A proven control plane still needs a production-grade runtime
 - **Two columns (side by side):**
-  - **Current controlled pilot:**
-    - Sequential DAG; single-process command-driven worker
+  - **Current state (post-transformation):**
+    - Durable queue **✓ delivered** (Celery) — parallel fan-out + autoscaling still pending
+    - Fabric interop/registry/scanners/broker built, but **no operator UI yet** (API-only)
     - Eval gate modelled but **not runtime-enforced**
-    - Model router is a **stub** (no live dispatch)
-    - Env-var secrets; basic connector URL validation
-    - No scheduled/event triggers; no workflow versioning
-    - Single service; no staging; retry-only resilience
+    - Broker selection is deterministic; live cost/latency **model router still a stub**
+    - Managed secrets vault, SSRF egress hardening: partial
+    - No scheduled/event triggers; no workflow versioning; single service, no staging
   - **Required production state:**
-    - Durable queue + parallel fan-out + autoscaled workers
+    - Parallel fan-out + autoscaled workers on the durable queue
+    - **Operator UI** for registry, scanner-review queue, broker & visualizer
     - Eval gate enforced at promotion; canary/A-B + auto-rollback
     - Live cost/latency/quality model router
-    - Managed secrets vault + rotation; SSRF/egress hardening
-    - Scheduled & event/webhook triggers; workflow versioning
+    - Managed secrets vault + rotation; SSRF/egress hardening completed
     - Staging + blue/green; circuit breaker/dead-letter/idempotency; HA/DR
-- **Takeaway (orange):** Preserve the proven product layer; systematically replace the prototype operating layer.
+- **Takeaway (orange):** The differentiated product layer is built; the remaining work is the operating layer, the UI surface, and certification — not core capability.
 
 ---
 
@@ -185,13 +230,13 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 
 | Date | Gate | Title | Focus |
 |---|---|---|---|
-| JUL 2026 | **H0** | Mobilise | Architecture · policies · baselines |
-| AUG–SEP 2026 | **G1** | Pilot ready | Identity · durable execution · runtime eval gate |
-| OCT–DEC 2026 | **G2** | Repeatable production | Resilience · staging/blue-green · MCP · model router |
+| JUL 2026 | **H0** | Mobilise | Architecture · policies · baselines · **Fabric transformation ✓ delivered** |
+| AUG–SEP 2026 | **G1** | Pilot ready | Identity · durable execution **✓** · runtime eval gate · **Fabric operator UI** |
+| OCT–DEC 2026 | **G2** | Repeatable production | Resilience · staging/blue-green · MCP **✓** · model router |
 | JAN–JUN 2027 | **G3** | Connected service | HA/DR · SaaS connectors · HITL · self-service builder |
 | JUL–DEC 2027 | **G4** | Enterprise scale | SOC 2 · Guardrails 2.0 · marketplace · channels |
 
-- **Principle (orange):** Each gate must pass security, quality, adoption and value criteria before scope or funding expands.
+- **Principle (orange):** Each gate must pass security, quality, adoption and value criteria before scope or funding expands. **The Fabric layer arrived early; gates now foreground hardening, the UI surface, and certification.**
 
 ---
 
@@ -243,15 +288,16 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 - **Production hardening:**
   - Enterprise SSO (SAML/OIDC) + server-side sessions
   - Secrets management: managed vault, encrypted at rest, rotation
-  - SSRF/egress hardening on connectors (allowlists, metadata-endpoint block)
-  - Durable workflow queue (Celery/RQ + broker) replacing single-process worker
+  - SSRF/egress hardening on connectors (allowlists, metadata-endpoint block) — *shared `net_guard` in place; complete coverage*
+  - Durable workflow queue (Celery/RQ + broker) replacing single-process worker — **✓ delivered (Phase 0)**
   - Parallel task fan-out in the orchestrator
   - OTLP exporter → external APM + golden dashboards
 - **Product & adoption:**
   - **Enforce the eval gate at runtime** (block promotion on failing suite)
+  - **Operator UI for the Fabric surfaces** — registry browser, scanner-review queue, broker console, visualizer graph *(APIs delivered; front-end pending)*
   - Agent versioning + one-click rollback UX
   - Pilot onboarding, training and support loop
-- **Exit evidence (orange):** Security review passed, no critical/high findings; secrets vaulted; eval gate blocking in prod; pilot fleet runs without admin intervention.
+- **Exit evidence (orange):** Security review passed, no critical/high findings; secrets vaulted; eval gate blocking in prod; Fabric UI live over the delivered APIs; pilot fleet runs without admin intervention.
 
 ---
 
@@ -269,8 +315,9 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
   - Alerting + on-call runbooks; structured logging + PII scrubbing
   - Automated compliance-evidence pipeline
 - **Product & adoption:**
-  - **MCP support** (consume MCP tools/servers)
-  - **Live model router** (cost/latency/quality-aware dispatch)
+  - **MCP support** (consume MCP tools/servers) — **✓ delivered (Phase 1)**; harden transport (initialize/session handshake) + curated public MCP registry
+  - **A2A hardening** — OIDC/mTLS for external callers; scanner coverage beyond Bedrock (Vertex, Agentforce, Copilot)
+  - **Live model router** (cost/latency/quality-aware dispatch) — upgrade the broker's deterministic selection with a live ranker
   - Scheduled & event-driven workflow triggers (cron + webhooks)
   - Executive opportunity/portfolio view
 - **Exit evidence (orange):** Two BUs on one configuration; SLOs met twice; zero-downtime deploys; ≥99% workflow-run success; evidence pipeline running.
@@ -345,9 +392,10 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 
 - **Eyebrow:** FUNCTIONALITY ROADMAP
 - **Title:** New functionality is sequenced around the next user decision
-- **Three wave cards:**
-  - **FY26 Wave 1 · Trust & control** — Runtime eval gate · agent versioning + rollback · budget/quality alerting hardened.
-  - **FY26 Wave 2 · Operate & connect** — MCP support · live model router · scheduled/event triggers · executive portfolio.
+- **Four wave cards:**
+  - **✓ Delivered · Governed Agent Fabric** — MCP + A2A interop · federated registry · scanners · governed broker · visualizer · durable execution *(Phases 0–4, Jul 2026)*.
+  - **FY26 Wave 1 · Trust, control & surface** — Runtime eval gate · agent versioning + rollback · budget/quality alerting hardened · **operator UI for the Fabric surfaces**.
+  - **FY26 Wave 2 · Operate & connect** — Live model router · additional scanners (Vertex/Agentforce/Copilot) · scheduled/event triggers · executive portfolio.
   - **FY27 · Connect & realise value** — SaaS connectors · HITL inbox · advanced RAG · canary/A-B · self-service builder · Guardrails 2.0 · marketplace · new channels · ROI analytics.
 - **Prioritisation test (orange):** Does the feature improve trust, shorten a decision cycle, or move an agent toward validated production value?
 
@@ -409,7 +457,7 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 - **Eyebrow:** DECISION REQUIRED
 - **Title:** July decisions determine whether the roadmap can start
 - **Four numbered asks:**
-  1. **Approve the FY26 hardening plan** — Fund mobilisation (H0) now; hold FY26 production funding to the G1 security & quality checkpoint. *(Budget envelope: [insert NTE].)*
+  1. **Fund productionisation + UI of the delivered Agent Fabric** — the Fabric layer is built (Phases 0–4); fund the operator UI and production-hardening now; hold FY26 production funding to the G1 security & quality checkpoint. *(Budget envelope: [insert NTE].)*
   2. **Name the sponsor, product owner and two pilot business units** — Commit builders, Security, Risk and Finance to the roadmap gates.
   3. **Approve the target architecture and data-governance policy** — Complete hosting, identity, model-routing, retention and source/tool-access decisions in July.
   4. **Reserve FY27 expansion funding subject to G2** — Release only when repeatable production, adoption, quality and credible value are demonstrated. *(Reserve: [insert NTE].)*
@@ -418,10 +466,15 @@ slide. No decorative color bars or underlines. Generous margins (≥0.5").
 ---
 
 ### Notes for the deck builder
+- **25 slides** after the Jul 2026 refresh (slides **3A** and **3B** inserted for the Agent Fabric
+  transformation). Keep the letter-suffixed slides in sequence between 3 and 4.
 - Dollar figures are left as `[insert NTE]` placeholders — the reference deck used specific
   not-to-exceed envelopes; fill in yours before presenting.
-- Content maps 1:1 to `PRODUCT_ROADMAP_FY26_FY27.md` (Tracks 1 & 2). If a target quarter here
-  differs from that doc, the doc's per-item DoD is authoritative — this deck rounds items into
-  the nearest horizon/gate for the executive narrative.
+- Content maps to `PRODUCT_ROADMAP_FY26_FY27.md` (Tracks 1 & 2) plus
+  `AGENT_FABRIC_TRANSFORMATION_STRATEGY.md` (strategic frame) and the Phase specs
+  (`PHASE1_…`–`PHASE4_…`) for delivered scope. Where a target quarter differs, the per-item DoD
+  in those docs is authoritative — this deck rounds items into the nearest horizon/gate.
+- **✓ DELIVERED** tags reflect code on trunk as of 25 Jul 2026 (512 tests green). The delivered
+  Fabric layer is at *pilot* maturity: APIs complete, operator UI and production-hardening pending.
 - Keep to Open Sans + the orange/grey palette above so it reads as a sibling to the Process
   Intelligence deck.
