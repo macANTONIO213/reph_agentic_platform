@@ -1560,6 +1560,86 @@ class AgentCard(models.Model):
         return f"AgentCard<{self.agent_id}> [{state}]"
 
 
+class RegistryEntry(models.Model):
+    """
+    Federated registry entry — Phase 2.
+
+    The canonical, searchable catalog record for **any** agent/tool endpoint the
+    platform knows about: first-party agents, external A2A agents, and MCP servers,
+    side by side.  It is a denormalised projection (normalised to A2A-card shape);
+    the source object stays the source of truth and is linked via provenance FKs.
+    First-party agents and MCP servers are projected in by ``services.interop.
+    federation``; Phase 3 scanners will sync external agents into the same table.
+    """
+    class Kind(models.TextChoices):
+        FIRST_PARTY_AGENT = "first_party_agent",  "First-party agent"
+        EXTERNAL_A2A       = "external_a2a_agent", "External A2A agent"
+        MCP_SERVER         = "mcp_server",         "MCP server"
+
+    class Visibility(models.TextChoices):
+        PRIVATE = "private", "Private"
+        PUBLIC  = "public",  "Public"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    identifier = models.CharField(
+        max_length=160,
+        help_text="Stable key within a kind (agent slug, server slug, external id).",
+    )
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    protocol = models.CharField(
+        max_length=8, blank=True, default="",
+        help_text="Wire protocol: 'a2a' or 'mcp'.",
+    )
+    endpoint_url = models.URLField(blank=True, default="")
+    domain = models.CharField(
+        max_length=80, blank=True, default="",
+        help_text="Business domain (sales/service/finance/hr…) for broker routing (Phase 4).",
+    )
+    provider_org = models.CharField(max_length=120, blank=True, default="")
+    capabilities = models.JSONField(
+        default=list, blank=True,
+        help_text="Normalised skills/tools: [{id, name, description}].",
+    )
+    card_json = models.JSONField(default=dict, blank=True)
+    governance = models.JSONField(
+        default=dict, blank=True,
+        help_text="Posture copied from the source: {risk_tier, guardrail_level, ...}.",
+    )
+    visibility = models.CharField(
+        max_length=8, choices=Visibility.choices, default=Visibility.PRIVATE,
+    )
+    source = models.CharField(
+        max_length=20, default="projection",
+        help_text="How catalogued: projection | manual | scanner.",
+    )
+    # Provenance (nullable; external entries have neither).
+    agent = models.ForeignKey(
+        Agent, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="registry_entries",
+    )
+    mcp_server = models.ForeignKey(
+        "RemoteMcpServer", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="registry_entries",
+    )
+    is_active = models.BooleanField(default=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["kind", "name"]
+        unique_together = [("kind", "identifier")]
+        indexes = [
+            models.Index(fields=["kind", "is_active"]),
+            models.Index(fields=["domain"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name} [{self.kind}]"
+
+
 class AsyncAgentTask(models.Model):
     """
     Durable record of a single asynchronous agent invocation — Phase 0.

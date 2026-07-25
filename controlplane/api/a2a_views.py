@@ -52,6 +52,30 @@ def discovery(request):
 
 
 @require_GET
+def registry(request):
+    """
+    GET /a2a/registry/ — agent-facing federated discovery.
+
+    Lets an external agent (or the future broker) query the catalog of ANY known
+    agent/tool endpoint. Filters: ?kind= &domain= &capability= &q=
+    """
+    ok, err = _authenticate(request)
+    if not ok:
+        return err
+    from controlplane.services.interop import federation
+    entries = federation.search_entries(
+        q=(request.GET.get("q") or "").strip(),
+        kind=(request.GET.get("kind") or "").strip(),
+        domain=(request.GET.get("domain") or "").strip(),
+        capability=(request.GET.get("capability") or "").strip(),
+    )
+    return JsonResponse({
+        "entries": [federation.to_public_dict(e) for e in entries],
+        "count": len(entries),
+    })
+
+
+@require_GET
 def agent_card(request, slug):
     """GET /a2a/agents/<slug>/card/ — one published agent's card."""
     ok, err = _authenticate(request)

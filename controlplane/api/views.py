@@ -984,6 +984,8 @@ def mcp_server_detail(request, server_id):
     server.is_active = False
     server.status = RemoteMcpServer.Status.DISABLED
     server.save(update_fields=["is_active", "status", "updated_at"])
+    from controlplane.services.interop import federation
+    federation.deactivate_mcp_server(server)
     AuditLog.objects.create(
         actor=request.user.username, action="mcp_server_disabled",
         resource_type="RemoteMcpServer", resource_id=str(server.id),
@@ -1013,6 +1015,9 @@ def mcp_server_sync(request, server_id):
         tools = mcp_client.list_tools(server, actor=request.user.username)
     except McpClientError as exc:
         return JsonResponse({"error": f"Catalog sync failed: {exc}"}, status=502)
+    # Project the now-active server into the federated registry (Phase 2).
+    from controlplane.services.interop import federation
+    federation.project_mcp_server(server)
     return JsonResponse({"server": _mcp_server_dict(server), "tools": tools})
 
 
@@ -1143,6 +1148,134 @@ def agent_a2a_card_publish(request, agent_id):
 
     unpublish_card(agent, by=request.user.username)
     return JsonResponse({"status": "unpublished"})
+
+
+# ── Phase 2: Federated registry (discovery catalog) ────────────────────────────
+
+def _registry_entry_dict(e, *, include_card: bool = False) -> dict:
+    d = {
+        "id": str(e.id),
+        "kind": e.kind,
+        "identifier": e.identifier,
+        "name": e.name,
+        "description": e.description,
+        "protocol": e.protocol,
+        "endpoint_url": e.endpoint_url,
+        "domain": e.domain,
+        "provider_org": e.provider_org,
+        "capabilities": e.capabilities,
+        "governance": e.governance,
+        "visibility": e.visibility,
+        "source": e.source,
+        "is_active": e.is_active,
+        "last_synced_at": e.last_synced_at.isoformat() if e.last_synced_at else None,
+    }
+    if include_card:
+        d["card_json"] = e.card_json
+    return d
+
+
+@login_required
+@require_GET
+def registry_list(request):
+    """
+    GET /api/v1/registry/ — the federated catalog of any agent/tool endpoint.
+
+    Filters: ?kind= &domain= &visibility= &capability= &q= (text over
+    name/description/identifier; capability matches skills).
+    """
+    from controlplane.services.interop import federation
+    entries = federation.search_entries(
+        q=(request.GET.get("q") or "").strip(),
+        kind=(request.GET.get("kind") or "").strip(),
+        domain=(request.GET.get("domain") or "").strip(),
+        capability=(request.GET.get("capability") or "").strip(),
+        visibility=(request.GET.get("visibility") or "").strip(),
+    )
+    return JsonResponse({
+        "entries": [_registry_entry_dict(e) for e in entries],
+        "count": len(entries),
+        "total": len(entries),
+    })
+
+
+@login_required
+@require_http_methods(["GET", "DELETE"])
+def registry_detail(request, entry_id):
+    """GET one catalog entry (with card) / DELETE = deactivate it."""
+    from controlplane.models import RegistryEntry
+    try:
+        e = RegistryEntry.objects.get(id=entry_id)
+    except RegistryEntry.DoesNotExist:
+        return JsonResponse({"error": "Registry entry not found."}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse(_registry_entry_dict(e, include_card=True))
+
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    e.is_active = False
+    e.save(update_fields=["is_active", "updated_at"])
+    AuditLog.objects.create(
+        actor=request.user.username, action="registry_entry_deactivated",
+        resource_type="RegistryEntry", resource_id=str(e.id),
+        payload={"kind": e.kind, "identifier": e.identifier},
+    )
+    # Note: a projected entry (first-party agent / MCP server) re-appears on the
+    # next sync while its source is still published/active — deactivation is most
+    # useful for manually-registered external entries.
+    return JsonResponse({"status": "deactivated", "id": str(e.id)})
+
+
+@login_required
+@require_POST
+def registry_register_external(request):
+    """
+    POST /api/v1/registry/external/ — register an external A2A agent by card URL.
+
+    Body: { "card_url": "...", "domain": "optional", "visibility": "private|public" }
+    """
+    role_error = _require_role(request, "agent_builder", "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    card_url = (body.get("card_url") or "").strip()
+    if not card_url:
+        return JsonResponse({"error": "card_url is required."}, status=400)
+    visibility = (body.get("visibility") or "private").strip().lower()
+    if visibility not in {"private", "public"}:
+        return JsonResponse({"error": "visibility must be 'private' or 'public'."}, status=400)
+
+    from controlplane.services.interop import federation
+    from controlplane.services.interop.a2a_client import A2AClientError
+    try:
+        entry = federation.register_external_agent(
+            card_url, domain=(body.get("domain") or "").strip(),
+            visibility=visibility, by=request.user.username,
+        )
+    except A2AClientError as exc:
+        return JsonResponse({"error": f"Could not register agent: {exc}"}, status=400)
+    return JsonResponse(_registry_entry_dict(entry, include_card=True), status=201)
+
+
+@login_required
+@require_POST
+def registry_sync(request):
+    """POST /api/v1/registry/sync/ — backfill the catalog from current sources."""
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.services.interop import federation
+    result = federation.sync_all()
+    AuditLog.objects.create(
+        actor=request.user.username, action="registry_synced",
+        resource_type="RegistryEntry", resource_id="all", payload=result,
+    )
+    return JsonResponse({"status": "synced", **result})
 
 
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────

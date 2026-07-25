@@ -87,6 +87,9 @@ def publish_card(agent, *, base_url: str = "", by: str = "system"):
         resource_type="Agent", resource_id=str(agent.id),
         payload={"slug": agent.slug, "version": agent.version},
     )
+    # Keep the federated registry (Phase 2) in sync with publish state.
+    from controlplane.services.interop import federation
+    federation.project_agent(agent)
     return card
 
 
@@ -104,4 +107,6 @@ def unpublish_card(agent, *, by: str = "system"):
         resource_type="Agent", resource_id=str(agent.id),
         payload={"slug": agent.slug},
     )
+    from controlplane.services.interop import federation
+    federation.unproject_agent(agent)
     return card

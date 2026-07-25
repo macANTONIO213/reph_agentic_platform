@@ -52,6 +52,11 @@ urlpatterns = [
     # Phase 1: A2A card preview / publish
     path("agents/<uuid:agent_id>/a2a-card/",           views.agent_a2a_card_preview,  name="api_agent_a2a_card"),
     path("agents/<uuid:agent_id>/a2a-card/publish/",   views.agent_a2a_card_publish,  name="api_agent_a2a_card_publish"),
+    # Phase 2: Federated registry (discovery catalog)
+    path("registry/",                                  views.registry_list,           name="api_registry_list"),
+    path("registry/sync/",                             views.registry_sync,           name="api_registry_sync"),
+    path("registry/external/",                         views.registry_register_external, name="api_registry_register_external"),
+    path("registry/<uuid:entry_id>/",                  views.registry_detail,         name="api_registry_detail"),
     # D1: Prometheus metrics
     path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
     # D2: OTel spans

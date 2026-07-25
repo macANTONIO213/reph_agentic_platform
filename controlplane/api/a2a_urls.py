@@ -4,6 +4,7 @@ from django.urls import path
 from . import a2a_views, mcp_server_views
 
 urlpatterns = [
+    path("registry/",                  a2a_views.registry,    name="a2a_registry"),
     path("agents/",                    a2a_views.discovery,   name="a2a_discovery"),
     path("agents/<slug:slug>/card/",   a2a_views.agent_card,  name="a2a_agent_card"),
     path("agents/<slug:slug>/rpc/",    a2a_views.rpc,         name="a2a_rpc"),
