@@ -1378,6 +1378,21 @@ def broker_execute(request):
     return JsonResponse(result, status=200 if result.get("routed") else 404)
 
 
+# ── Phase 4: Visualizer (agent interaction graph) ──────────────────────────────
+
+@login_required
+@require_GET
+def visualizer_graph(request):
+    """GET /api/v1/visualizer/graph/?window=30 — agent interaction map (nodes + edges)."""
+    try:
+        window_days = int(request.GET.get("window", "30"))
+    except (TypeError, ValueError):
+        window_days = 30
+    window_days = max(1, min(window_days, 365))
+    from controlplane.services.visualizer import build_graph
+    return JsonResponse(build_graph(window_days=window_days))
+
+
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────
 
 @login_required

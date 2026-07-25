@@ -41,5 +41,9 @@
 
 ## 5. Steps
 
-1. Broker: select / route / route-and-execute + API. *(this increment)*
-2. Visualizer graph-data endpoint + dashboard surface; optional LLM/A2A-outbound routing.
+1. ✅ **Broker** — `select_candidates` / `route` / `route_and_execute` (governed) + `/broker/route`
+   & `/broker/execute` API. *(done)*
+2. ✅ **Visualizer graph data** — `services/visualizer.build_graph` reconstructs the interaction
+   map (nodes = agents with run metrics; edges = broker / A2A-inbound / delegation hops) from the
+   audit log + tool-call records; `GET /api/v1/visualizer/graph/`. *(done)* Dashboard rendering +
+   LLM/A2A-outbound routing deferred as follow-ups.

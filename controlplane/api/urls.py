@@ -64,6 +64,8 @@ urlpatterns = [
     # Phase 4: Broker (intent → agent routing)
     path("broker/route/",                              views.broker_route,            name="api_broker_route"),
     path("broker/execute/",                            views.broker_execute,          name="api_broker_execute"),
+    # Phase 4: Visualizer (agent interaction graph)
+    path("visualizer/graph/",                          views.visualizer_graph,        name="api_visualizer_graph"),
     # D1: Prometheus metrics
     path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
     # D2: OTel spans
