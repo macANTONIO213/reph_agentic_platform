@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import logging
 
+from controlplane.services.scanners.agentforce import AgentforceScanner
 from controlplane.services.scanners.base import ScannerError
 from controlplane.services.scanners.bedrock import BedrockScanner
+from controlplane.services.scanners.vertex import VertexScanner
 
 logger = logging.getLogger(__name__)
 
-# Platform → scanner class. Vertex/Agentforce/Copilot land here in step 2.
+# Platform → scanner class. (Copilot Studio follows the same shape.)
 _SCANNERS: dict = {
     "bedrock": BedrockScanner,
+    "vertex": VertexScanner,
+    "agentforce": AgentforceScanner,
 }
 
 

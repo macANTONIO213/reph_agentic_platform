@@ -15,7 +15,9 @@ from django.test import TestCase, override_settings
 from controlplane.models import BusinessUnit, RegistryEntry
 from controlplane.services.interop import federation
 from controlplane.services.scanners import service as scanner_service
+from controlplane.services.scanners.agentforce import AgentforceScanner
 from controlplane.services.scanners.bedrock import BedrockScanner
+from controlplane.services.scanners.vertex import VertexScanner
 
 
 AGENTS = [
@@ -31,6 +33,31 @@ class _FakeBedrock:
 
     def list_agents(self):
         return {"agentSummaries": self._agents}
+
+
+VERTEX_ENGINES = [
+    {"name": "projects/p/locations/l/reasoningEngines/RE1", "displayName": "Vertex Planner",
+     "description": "plans things",
+     "spec": {"model": "gemini-1.5-pro",
+              "classMethods": [{"name": "plan", "description": "make a plan"}]}},
+    {"description": "no name — skipped"},
+]
+
+AGENTFORCE_AGENTS = [
+    {"id": "BOT1", "name": "Service Agent", "description": "helps customers",
+     "model": "einstein-gpt", "topics": [{"name": "orders", "description": "order help"}]},
+    {"name": "no id — skipped"},
+]
+
+
+class _FakeVertex:
+    def list_reasoning_engines(self):
+        return {"reasoningEngines": VERTEX_ENGINES}
+
+
+class _FakeAgentforce:
+    def list_agents(self):
+        return {"agents": AGENTFORCE_AGENTS}
 
 
 def _bu(name="Engineering"):
@@ -97,6 +124,50 @@ class BedrockScannerTests(TestCase):
             scanner_service.run_scan("nope")
 
 
+# ── Vertex + Agentforce scanners ────────────────────────────────────────────────
+
+class VertexScannerTests(TestCase):
+    def test_scan_normalises(self):
+        agents = VertexScanner(client=_FakeVertex()).scan()
+        self.assertEqual(len(agents), 1)
+        a = agents[0]
+        self.assertEqual(a.external_id, "RE1")
+        self.assertEqual(a.name, "Vertex Planner")
+        self.assertEqual(a.model, "gemini-1.5-pro")
+        self.assertEqual(a.platform, "vertex")
+        self.assertEqual([c["id"] for c in a.capabilities], ["plan"])
+
+    def test_run_scan_catalogs_discovered(self):
+        result = scanner_service.run_scan("vertex", client=_FakeVertex())
+        self.assertEqual(result["discovered"], 1)
+        e = RegistryEntry.objects.get(identifier="vertex:RE1")
+        self.assertEqual(e.source, "scanner")
+        self.assertEqual(e.review_status, RegistryEntry.ReviewStatus.DISCOVERED)
+        self.assertEqual(e.governance["model"], "gemini-1.5-pro")
+
+
+class AgentforceScannerTests(TestCase):
+    def test_scan_normalises(self):
+        agents = AgentforceScanner(client=_FakeAgentforce()).scan()
+        self.assertEqual(len(agents), 1)
+        a = agents[0]
+        self.assertEqual(a.external_id, "BOT1")
+        self.assertEqual(a.name, "Service Agent")
+        self.assertEqual(a.platform, "agentforce")
+        self.assertEqual([c["id"] for c in a.capabilities], ["orders"])
+
+    def test_run_scan_catalogs_discovered(self):
+        result = scanner_service.run_scan("agentforce", client=_FakeAgentforce())
+        self.assertEqual(result["discovered"], 1)
+        self.assertTrue(RegistryEntry.objects.filter(identifier="agentforce:BOT1").exists())
+
+    def test_missing_config_raises(self):
+        from controlplane.services.scanners.base import ScannerError
+        # no injected client and no Salesforce settings → clear ScannerError
+        with self.assertRaises(ScannerError):
+            AgentforceScanner().scan()
+
+
 # ── API ──────────────────────────────────────────────────────────────────────────
 
 class ScannerApiTests(TestCase):
@@ -109,7 +180,10 @@ class ScannerApiTests(TestCase):
     def test_list_platforms(self):
         self.client.force_login(self.viewer)
         resp = self.client.get("/api/v1/scanners/")
-        self.assertIn("bedrock", resp.json()["platforms"])
+        platforms = resp.json()["platforms"]
+        self.assertIn("bedrock", platforms)
+        self.assertIn("vertex", platforms)
+        self.assertIn("agentforce", platforms)
 
     def test_scan_requires_admin(self):
         self.client.force_login(self.approver)
