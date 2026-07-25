@@ -1580,6 +1580,11 @@ class RegistryEntry(models.Model):
         PRIVATE = "private", "Private"
         PUBLIC  = "public",  "Public"
 
+    class ReviewStatus(models.TextChoices):
+        DISCOVERED = "discovered", "Discovered"   # auto-scanned, pending human review
+        APPROVED   = "approved",   "Approved"     # governed source or human-approved
+        REJECTED   = "rejected",   "Rejected"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     kind = models.CharField(max_length=24, choices=Kind.choices)
     identifier = models.CharField(
@@ -1609,6 +1614,11 @@ class RegistryEntry(models.Model):
     )
     visibility = models.CharField(
         max_length=8, choices=Visibility.choices, default=Visibility.PRIVATE,
+    )
+    review_status = models.CharField(
+        max_length=12, choices=ReviewStatus.choices, default=ReviewStatus.APPROVED,
+        help_text="Scanned entries start 'discovered' and are hidden from agent-facing "
+                  "discovery until approved. Governed sources default 'approved'.",
     )
     source = models.CharField(
         max_length=20, default="projection",

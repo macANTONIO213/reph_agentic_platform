@@ -1166,6 +1166,7 @@ def _registry_entry_dict(e, *, include_card: bool = False) -> dict:
         "capabilities": e.capabilities,
         "governance": e.governance,
         "visibility": e.visibility,
+        "review_status": e.review_status,
         "source": e.source,
         "is_active": e.is_active,
         "last_synced_at": e.last_synced_at.isoformat() if e.last_synced_at else None,
@@ -1181,8 +1182,9 @@ def registry_list(request):
     """
     GET /api/v1/registry/ — the federated catalog of any agent/tool endpoint.
 
-    Filters: ?kind= &domain= &visibility= &capability= &q= (text over
-    name/description/identifier; capability matches skills).
+    Filters: ?kind= &domain= &visibility= &capability= &q= &review_status=
+    (default review_status=approved; pass 'discovered' to review scan results,
+    or 'all' for everything).
     """
     from controlplane.services.interop import federation
     entries = federation.search_entries(
@@ -1191,6 +1193,7 @@ def registry_list(request):
         domain=(request.GET.get("domain") or "").strip(),
         capability=(request.GET.get("capability") or "").strip(),
         visibility=(request.GET.get("visibility") or "").strip(),
+        review_status=(request.GET.get("review_status") or "approved").strip(),
     )
     return JsonResponse({
         "entries": [_registry_entry_dict(e) for e in entries],
@@ -1276,6 +1279,61 @@ def registry_sync(request):
         resource_type="RegistryEntry", resource_id="all", payload=result,
     )
     return JsonResponse({"status": "synced", **result})
+
+
+# ── Phase 3: Scanners (auto-discovery) ─────────────────────────────────────────
+
+@login_required
+@require_GET
+def scanners_list(request):
+    """GET /api/v1/scanners/ — available scanner platforms."""
+    from controlplane.services.scanners import service as scanner_service
+    return JsonResponse({"platforms": scanner_service.available_platforms()})
+
+
+@login_required
+@require_POST
+def scanner_scan(request, platform):
+    """POST /api/v1/scanners/<platform>/scan/ — crawl a platform into the registry."""
+    role_error = _require_role(request, "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.services.scanners import service as scanner_service
+    from controlplane.services.scanners.base import ScannerError
+    try:
+        result = scanner_service.run_scan(platform, by=request.user.username)
+    except ScannerError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"status": "scanned", **result})
+
+
+@login_required
+@require_POST
+def registry_approve(request, entry_id):
+    """
+    POST /api/v1/registry/<id>/approve/ — approve/reject a discovered catalog entry.
+
+    Body: { "status": "approved" | "rejected" }  (requires agent_approver)
+    """
+    role_error = _require_role(request, "agent_approver", "platform_admin")
+    if role_error is not None:
+        return role_error
+    from controlplane.models import RegistryEntry
+    try:
+        entry = RegistryEntry.objects.get(id=entry_id)
+    except RegistryEntry.DoesNotExist:
+        return JsonResponse({"error": "Registry entry not found."}, status=404)
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+    status = (body.get("status") or "approved").strip().lower()
+    if status not in {"approved", "rejected"}:
+        return JsonResponse({"error": "status must be 'approved' or 'rejected'."}, status=400)
+
+    from controlplane.services.interop import federation
+    federation.set_review_status(entry, status, by=request.user.username)
+    return JsonResponse({"id": str(entry.id), "review_status": status})
 
 
 # ── D1: Prometheus metrics ────────────────────────────────────────────────────

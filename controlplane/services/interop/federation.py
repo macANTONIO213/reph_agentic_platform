@@ -180,11 +180,15 @@ def _entry_matches_capability(entry, cap: str) -> bool:
 
 
 def search_entries(*, q="", kind="", domain="", capability="", visibility="",
-                   active_only=True, limit=200) -> list:
+                   review_status="approved", active_only=True, limit=200) -> list:
     """
     Query the federated catalog. Shared by the human API and the agent-facing
     /a2a/registry/ endpoint.  Text (`q`) matches name/description/identifier in the
     DB; `capability` is matched against each entry's skills in Python (JSON field).
+
+    ``review_status`` defaults to "approved" so auto-scanned (discovered) entries
+    are excluded from discovery until a human approves them; pass "all" to include
+    every status (operator review).
     """
     from django.db.models import Q
     from controlplane.models import RegistryEntry
@@ -192,6 +196,8 @@ def search_entries(*, q="", kind="", domain="", capability="", visibility="",
     qs = RegistryEntry.objects.all()
     if active_only:
         qs = qs.filter(is_active=True)
+    if review_status and review_status != "all":
+        qs = qs.filter(review_status=review_status)
     if kind:
         qs = qs.filter(kind=kind)
     if domain:
@@ -223,6 +229,65 @@ def to_public_dict(e) -> dict:
         "capabilities": e.capabilities,
         "governance": e.governance,
     }
+
+
+# ── scanned agents (Phase 3) ────────────────────────────────────────────────────
+
+def catalog_scanned_agent(d) -> "object":
+    """
+    Catalog a scanner's DiscoveredAgent into the registry.
+
+    Lands as source="scanner", review_status="discovered" (hidden from discovery
+    until approved).  Idempotent by (platform, external_id); a re-scan never
+    downgrades an already-approved entry back to discovered.
+    """
+    from controlplane.models import RegistryEntry
+
+    identifier = f"{d.platform}:{d.external_id}"[:160]
+    existing = RegistryEntry.objects.filter(
+        kind=RegistryEntry.Kind.EXTERNAL_A2A, identifier=identifier,
+    ).first()
+    review_status = existing.review_status if existing else RegistryEntry.ReviewStatus.DISCOVERED
+
+    card = {
+        "name": d.name,
+        "description": d.description,
+        "url": d.endpoint_url,
+        "skills": d.capabilities,
+        "x-scan": {"platform": d.platform, "model": d.model, "data_access": d.data_access},
+    }
+    return upsert_entry(
+        kind=RegistryEntry.Kind.EXTERNAL_A2A,
+        identifier=identifier,
+        defaults={
+            "name": d.name,
+            "description": d.description,
+            "protocol": "a2a",
+            "endpoint_url": d.endpoint_url,
+            "provider_org": d.platform,
+            "capabilities": d.capabilities,
+            "card_json": card,
+            "governance": {"platform": d.platform, "model": d.model},
+            "visibility": RegistryEntry.Visibility.PRIVATE,
+            "review_status": review_status,
+            "source": "scanner",
+            "agent": None,
+            "mcp_server": None,
+        },
+    )
+
+
+def set_review_status(entry, status: str, *, by: str = "system"):
+    """Approve/reject a catalog entry (used to bless a discovered scan result)."""
+    from controlplane.models import AuditLog
+    entry.review_status = status
+    entry.save(update_fields=["review_status", "updated_at"])
+    AuditLog.objects.create(
+        actor=by, action="registry_entry_reviewed",
+        resource_type="RegistryEntry", resource_id=str(entry.id),
+        payload={"identifier": entry.identifier, "review_status": status},
+    )
+    return entry
 
 
 # ── full backfill ────────────────────────────────────────────────────────────────

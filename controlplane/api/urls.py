@@ -56,7 +56,11 @@ urlpatterns = [
     path("registry/",                                  views.registry_list,           name="api_registry_list"),
     path("registry/sync/",                             views.registry_sync,           name="api_registry_sync"),
     path("registry/external/",                         views.registry_register_external, name="api_registry_register_external"),
+    path("registry/<uuid:entry_id>/approve/",          views.registry_approve,        name="api_registry_approve"),
     path("registry/<uuid:entry_id>/",                  views.registry_detail,         name="api_registry_detail"),
+    # Phase 3: Scanners (auto-discovery)
+    path("scanners/",                                  views.scanners_list,           name="api_scanners_list"),
+    path("scanners/<str:platform>/scan/",              views.scanner_scan,            name="api_scanner_scan"),
     # D1: Prometheus metrics
     path("metrics/",                                   views.prometheus_metrics,      name="api_metrics"),
     # D2: OTel spans
