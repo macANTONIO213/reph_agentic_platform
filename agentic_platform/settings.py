@@ -189,6 +189,13 @@ A2A_ACCESS_TOKENS = [
 # Public base URL advertised in agent cards (falls back to the request host).
 A2A_PUBLIC_BASE_URL = os.environ.get("A2A_PUBLIC_BASE_URL", "")
 
+# ── Phase 4: Broker routing ───────────────────────────────────────────────────
+# "deterministic" (default; keyword/domain/capability scoring) or "llm" (live,
+# quality-aware LLM ranker over the deterministic shortlist — falls back to
+# deterministic when no ANTHROPIC_API_KEY or on any LLM error).
+BROKER_ROUTER_MODE = os.environ.get("BROKER_ROUTER_MODE", "deterministic").lower()
+BROKER_ROUTER_MODEL = os.environ.get("BROKER_ROUTER_MODEL", "claude-sonnet-4-6")
+
 # ── Phase 1 stretch: MCP server (expose our governed tools) ────────────────────
 # Exposes an allowlisted set of builtin tools as an MCP server at /a2a/mcp/.
 # OFF by default; when on, external callers present a bearer token.

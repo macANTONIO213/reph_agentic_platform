@@ -7,9 +7,10 @@ the chosen agent runs through the governed runtime (an AgentRun is created) and 
 broker hop is audited.
 """
 import json
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from controlplane.models import (
     Agent, AgentRun, AuditLog, BusinessUnit, RegistryEntry,
@@ -143,3 +144,92 @@ class BrokerApiTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["routed"])
         self.assertEqual(resp.json()["state"], "completed")
+
+
+# ── live LLM router ──────────────────────────────────────────────────────────────
+
+def _make_anthropic(json_text):
+    """Build a fake anthropic.Anthropic class whose messages.create returns json_text."""
+    class _Block:
+        type = "text"
+        def __init__(self, t):
+            self.text = t
+
+    class _Resp:
+        def __init__(self, t):
+            self.content = [_Block(t)]
+
+    class _Msgs:
+        def create(self, **kw):
+            return _Resp(json_text)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.messages = _Msgs()
+
+    return _Client
+
+
+class BrokerLlmRouterTests(TestCase):
+    def setUp(self):
+        self.bu = _bu()
+        self.finance = _agent("finance-bot", bu=self.bu,
+                              purpose="finance forecasting", tools=["forecast"])
+        self.hr = _agent("hr-bot", bu=self.bu,
+                        purpose="time off and leave", tools=["pto"])
+        publish_card(self.finance, base_url="https://p.test")
+        publish_card(self.hr, base_url="https://p.test")
+
+    def _entries(self):
+        return [e for e, _s in broker.select_candidates("anything")]
+
+    @override_settings(ANTHROPIC_API_KEY="")
+    def test_llm_rank_no_key_returns_none(self):
+        self.assertIsNone(broker.llm_rank("x", self._entries()))
+
+    @override_settings(ANTHROPIC_API_KEY="k")
+    def test_llm_rank_parses_ranking(self):
+        client = _make_anthropic('{"ranking":[1,0],"reasoning":"hr first","confidence":0.8}')
+        with patch("anthropic.Anthropic", client):
+            res = broker.llm_rank("help with leave", self._entries())
+        self.assertIsNotNone(res)
+        order, reasoning, conf = res
+        self.assertEqual(order, [1, 0])
+        self.assertEqual(conf, 0.8)
+
+    @override_settings(ANTHROPIC_API_KEY="k")
+    def test_llm_rank_malformed_returns_none(self):
+        with patch("anthropic.Anthropic", _make_anthropic("not json at all")):
+            self.assertIsNone(broker.llm_rank("x", self._entries()))
+
+    @override_settings(BROKER_ROUTER_MODE="llm")
+    def test_route_uses_llm_reorder(self):
+        with patch("controlplane.services.interop.broker.llm_rank",
+                   return_value=([1, 0], "because", 0.7)):
+            r = broker.route("something that matches both weakly")
+        self.assertEqual(r["method"], "llm")
+        self.assertEqual(r["confidence"], 0.7)
+        self.assertEqual(r["reasoning"], "because")
+
+    @override_settings(BROKER_ROUTER_MODE="llm", ANTHROPIC_API_KEY="")
+    def test_route_falls_back_deterministic(self):
+        r = broker.route("forecast")  # llm_rank returns None (no key)
+        self.assertEqual(r["method"], "deterministic")
+
+    @override_settings(BROKER_ROUTER_MODE="deterministic")
+    def test_deterministic_mode_never_calls_llm(self):
+        with patch("controlplane.services.interop.broker.llm_rank") as m:
+            broker.route("forecast")
+        m.assert_not_called()
+
+    @override_settings(BROKER_ROUTER_MODE="llm")
+    def test_route_and_execute_respects_llm(self):
+        cands = broker.select_candidates("generic")
+        hr_idx = next(i for i, (e, _s) in enumerate(cands) if e.identifier == "hr-bot")
+        order = [hr_idx] + [i for i in range(len(cands)) if i != hr_idx]
+        with patch("controlplane.services.interop.broker.llm_rank",
+                   return_value=(order, "hr best", 0.9)):
+            res = broker.route_and_execute("generic")
+        self.assertTrue(res["routed"])
+        self.assertEqual(res["agent"]["slug"], "hr-bot")
+        self.assertEqual(res["method"], "llm")

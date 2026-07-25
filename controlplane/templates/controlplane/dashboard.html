@@ -2009,6 +2009,13 @@
 
       // ── Broker ───────────────────────────────────────────────────────────
       function brief(e){return `<span class="fab-pill kind">${esc(KIND_LABEL[e.kind]||e.kind)}</span> <strong>${esc(e.name)}</strong>`+(e.domain?` <span class="fab-pill muted">${esc(e.domain)}</span>`:'');}
+      function methodLine(r){
+        if(!r||!r.method)return '';
+        const pill=r.method==='llm'?'<span class="fab-pill ok">LLM router</span>':'<span class="fab-pill muted">deterministic</span>';
+        const conf=(r.confidence!=null)?` · confidence ${r.confidence}`:'';
+        const why=r.reasoning?` — ${esc(r.reasoning)}`:'';
+        return `<div class="fab-subhead">Routing ${pill}${conf}${why}</div>`;
+      }
       async function brokerRoute(){
         const intent=document.getElementById('fabBrokerIntent').value.trim();
         const domain=document.getElementById('fabBrokerDomain').value.trim();
@@ -2017,7 +2024,8 @@
         box.innerHTML='<div class="loading-cell">Routing…</div>';
         try{
           const r=await jpost('/api/v1/broker/route/',{intent,domain});
-          let html=r.decision?`<div class="fab-card"><h4>Best match</h4>${brief(r.decision)}</div>`:'<div class="fab-card">No match.</div>';
+          let html=methodLine(r);
+          html+=r.decision?`<div class="fab-card"><h4>Best match</h4>${brief(r.decision)}</div>`:'<div class="fab-card">No match.</div>';
           if(r.candidates&&r.candidates.length){
             html+='<div class="fab-subhead">Ranked candidates</div>';
             html+=r.candidates.map(c=>`<div class="fab-card">${brief(c.entry)} <span class="fab-pill muted">score ${c.score}</span></div>`).join('');
@@ -2033,8 +2041,9 @@
         box.innerHTML='<div class="loading-cell">Routing &amp; executing…</div>';
         try{
           const r=await jpost('/api/v1/broker/execute/',{intent,domain});
-          if(!r.routed){box.innerHTML=`<div class="fab-card"><h4>Not routed</h4>${esc(r.reason||'')}</div>`;return;}
-          box.innerHTML=`<div class="fab-card"><h4>Routed → ${esc(r.agent.name)} <span class="fab-pill ok">${esc(r.state)}</span></h4>`
+          if(!r.routed){box.innerHTML=methodLine(r)+`<div class="fab-card"><h4>Not routed</h4>${esc(r.reason||'')}</div>`;return;}
+          box.innerHTML=methodLine(r)
+            +`<div class="fab-card"><h4>Routed → ${esc(r.agent.name)} <span class="fab-pill ok">${esc(r.state)}</span></h4>`
             +`<div style="white-space:pre-wrap;color:#3F3F3F;margin-top:.4rem">${esc(r.output||'(no output)')}</div></div>`;
         }catch(err){box.innerHTML='';toast(err.message,true);}
       }
