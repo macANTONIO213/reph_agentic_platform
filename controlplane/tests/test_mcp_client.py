@@ -147,3 +147,42 @@ class McpClientTests(TestCase):
             with patch("urllib.request.urlopen", _urlopen_returning(payload, capture)):
                 mcp_client.list_tools(self.server)
         self.assertEqual(capture["req"].headers.get("Authorization"), "Bearer s3cr3t")
+
+    def test_initialize_handshake_threads_session(self):
+        class _RespH:
+            def __init__(self, payload, session=None):
+                self._raw = json.dumps(payload).encode()
+                self._session = session
+
+            def read(self, n=None):
+                return self._raw
+
+            def getheader(self, k):
+                return self._session if k == "Mcp-Session-Id" else None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        calls = []
+
+        def _fake(req, timeout=None):
+            method = json.loads(req.data.decode()).get("method")
+            # urllib capitalises header keys: "Mcp-Session-Id" -> "Mcp-session-id"
+            calls.append({"method": method, "session": req.headers.get("Mcp-session-id")})
+            if method == "initialize":
+                return _RespH({"result": {"protocolVersion": "2024-11-05"}}, session="sess-123")
+            return _RespH({"result": {"tools": []}})
+
+        with patch("urllib.request.urlopen", _fake):
+            mcp_client.list_tools(self.server)
+
+        methods = [c["method"] for c in calls]
+        self.assertIn("initialize", methods)            # handshake happened
+        self.assertIn("notifications/initialized", methods)  # ack sent (session issued)
+        self.assertIn("tools/list", methods)
+        # the tools/list request carried the session id from initialize
+        tools_call = next(c for c in calls if c["method"] == "tools/list")
+        self.assertEqual(tools_call["session"], "sess-123")

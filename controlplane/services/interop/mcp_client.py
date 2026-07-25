@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT_SECONDS = 15
 _MAX_RESPONSE_BYTES = 2_097_152  # 2 MB
+_PROTOCOL_VERSION = "2024-11-05"
 
 
 class McpClientError(RuntimeError):
@@ -51,7 +52,8 @@ class McpClient:
         """Introspect the server, cache the normalised catalog, mark it ACTIVE."""
         from controlplane.models import RemoteMcpServer
 
-        result = self._rpc("tools/list", {}, actor=actor)
+        session_id = self._establish_session(actor)
+        result, _ = self._rpc("tools/list", {}, actor=actor, session_id=session_id)
         tools = []
         for t in result.get("tools") or []:
             if not isinstance(t, dict) or not t.get("name"):
@@ -73,12 +75,45 @@ class McpClient:
 
     def call_tool(self, mcp_tool_name: str, arguments: dict | None, *, actor: str = "agent") -> dict:
         """Invoke a remote tool; return a normalised result dict."""
-        result = self._rpc(
+        session_id = self._establish_session(actor)
+        result, _ = self._rpc(
             "tools/call",
             {"name": mcp_tool_name, "arguments": arguments or {}},
-            actor=actor,
+            actor=actor, session_id=session_id,
         )
         return self._normalise_call_result(result)
+
+    # ── MCP handshake ───────────────────────────────────────────────────────────
+
+    def _establish_session(self, actor: str) -> str | None:
+        """
+        Perform the MCP ``initialize`` handshake and return a session id when the
+        server issues one (streamable-HTTP session), else None.
+
+        Best-effort and never fatal: a server that doesn't implement ``initialize``
+        (plain JSON-RPC) or is unreachable simply yields None, and the caller
+        proceeds session-less (the tools request will surface any real error).
+        """
+        try:
+            _result, session_id = self._rpc(
+                "initialize",
+                {
+                    "protocolVersion": _PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "RELX-AgentPlatform", "version": "1.0"},
+                },
+                actor=actor,
+            )
+        except McpClientError:
+            return None
+        if session_id:
+            # Acknowledge readiness for the session (notification — no response).
+            try:
+                self._rpc("notifications/initialized", {}, actor=actor,
+                          session_id=session_id, is_notification=True)
+            except McpClientError:
+                pass
+        return session_id
 
     # ── internal ──────────────────────────────────────────────────────────────
 
@@ -100,11 +135,29 @@ class McpClient:
         ref = (self.server.auth_ref or "").strip()
         return os.environ.get(ref, "") if ref else ""
 
-    def _rpc(self, method: str, params: dict, *, actor: str) -> dict:
+    @staticmethod
+    def _session_from(resp) -> str | None:
+        """Read the Mcp-Session-Id response header, defensively (tolerant of fakes)."""
+        try:
+            getter = getattr(resp, "getheader", None)
+            if callable(getter):
+                return getter("Mcp-Session-Id")
+            hdrs = getattr(resp, "headers", None)
+            if hdrs is not None and hasattr(hdrs, "get"):
+                return hdrs.get("Mcp-Session-Id")
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def _rpc(self, method: str, params: dict, *, actor: str,
+             session_id: str | None = None, is_notification: bool = False) -> tuple:
+        """POST a JSON-RPC request/notification. Returns (result, response_session_id)."""
         # SSRF guard BEFORE any network activity.
         validate_destination(self.server.base_url, error_cls=McpClientError)
 
-        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        payload = {"jsonrpc": "2.0", "method": method, "params": params}
+        if not is_notification:
+            payload["id"] = 1
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -113,6 +166,8 @@ class McpClient:
         token = self._resolve_auth()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
 
         req = urllib.request.Request(
             self.server.base_url,
@@ -123,9 +178,15 @@ class McpClient:
         try:
             with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
                 raw = resp.read(_MAX_RESPONSE_BYTES)
+                resp_session = self._session_from(resp)
         except Exception as exc:  # noqa: BLE001 — surface as a domain error
-            self._audit(method, actor, success=False, error=str(exc))
+            if not is_notification:
+                self._audit(method, actor, success=False, error=str(exc))
             raise McpClientError(f"MCP {method} request failed: {exc}") from exc
+
+        # Notifications carry no response body to parse.
+        if is_notification:
+            return {}, resp_session
 
         try:
             envelope = json.loads(raw)
@@ -140,7 +201,7 @@ class McpClient:
 
         result = envelope.get("result", {}) if isinstance(envelope, dict) else {}
         self._audit(method, actor, success=True)
-        return result if isinstance(result, dict) else {}
+        return (result if isinstance(result, dict) else {}), resp_session
 
     def _audit(self, method: str, actor: str, *, success: bool, error: str = "") -> None:
         try:
