@@ -22,6 +22,41 @@ class ApiVersionHeadersMiddleware:
         return response
 
 
+class ApiKeyAuthMiddleware:
+    """
+    Session-less /api/v1 authentication via ``X-API-Key`` (IN-1).
+
+    The presented key is SHA-256 hashed and matched against active ``ApiKey``
+    rows; on match the request is authenticated as the key's owner and CSRF is
+    waived (header-carried credentials are not CSRF-forgeable). Runs after
+    AuthenticationMiddleware so session logins always take precedence.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        raw = request.headers.get("X-API-Key", "")
+        if raw and request.path.startswith("/api/") and not request.user.is_authenticated:
+            import hashlib
+
+            from django.utils import timezone
+
+            from controlplane.models import ApiKey
+
+            digest = hashlib.sha256(raw.encode()).hexdigest()
+            key = (
+                ApiKey.objects.select_related("user")
+                .filter(key_hash=digest, is_active=True, user__is_active=True)
+                .first()
+            )
+            if key:
+                request.user = key.user
+                request._dont_enforce_csrf_checks = True
+                ApiKey.objects.filter(pk=key.pk).update(last_used_at=timezone.now())
+        return self.get_response(request)
+
+
 class ApiGlobalRateLimitMiddleware:
     """
     Request-level throttle for authenticated API traffic.

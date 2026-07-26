@@ -69,6 +69,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "controlplane.middleware.ApiKeyAuthMiddleware",
     "controlplane.middleware.ApiGlobalRateLimitMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -100,6 +101,16 @@ _database_url = os.environ.get("DATABASE_URL", "")
 if _database_url:
     DATABASES = {"default": _dj_db_url.config(default=_database_url, conn_max_age=600)}
 else:
+    # SQLite is a demo/dev convenience only: no pgvector, poor write concurrency.
+    # A production (DEBUG=False) boot must point DATABASE_URL at Postgres, or
+    # explicitly opt in to SQLite (e.g. single-node evaluation) via env.
+    if not DEBUG and os.environ.get("ALLOW_SQLITE_IN_PROD", "").lower() not in ("true", "1", "yes"):
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "DATABASE_URL is unset while DEBUG=False. SQLite is demo-only; "
+            "set DATABASE_URL to a PostgreSQL DSN (or ALLOW_SQLITE_IN_PROD=true to override)."
+        )
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -185,7 +196,7 @@ LOGGING = {
 }
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "Asia/Manila"
+TIME_ZONE = os.environ.get("TIME_ZONE", "UTC")
 USE_I18N = True
 USE_TZ = True
 
@@ -240,7 +251,8 @@ METRICS_SCRAPE_TOKENS = [
 ]
 # Require an active EvalSuite before promoting agents at/above this risk tier
 # (0 disables the requirement; the passing-run gate still applies when a suite exists).
-EVAL_GATE_REQUIRE_SUITE_MIN_TIER = int(os.environ.get("EVAL_GATE_REQUIRE_SUITE_MIN_TIER", "0"))
+# Default 3: tier-3/4 agents cannot reach production untested (GV-1 hardening).
+EVAL_GATE_REQUIRE_SUITE_MIN_TIER = int(os.environ.get("EVAL_GATE_REQUIRE_SUITE_MIN_TIER", "3"))
 RETENTION_TELEMETRY_DAYS = int(os.environ.get("RETENTION_TELEMETRY_DAYS", "30"))
 RETENTION_SPANS_DAYS = int(os.environ.get("RETENTION_SPANS_DAYS", "30"))
 RETENTION_SESSIONS_DAYS = int(os.environ.get("RETENTION_SESSIONS_DAYS", "90"))
@@ -261,8 +273,11 @@ PLATFORM_ENTERPRISE_MIN_SCORE = float(os.environ.get("PLATFORM_ENTERPRISE_MIN_SC
 #   "db"     — legacy DB-backed queue drained by the `process_workflow_runs`
 #              management command (agent tasks run synchronously in-process).
 #   "celery" — dispatch to Celery workers over the Redis broker (durable, async).
-# Default "db" keeps existing behaviour and requires no broker.
-EXECUTION_BACKEND = os.environ.get("EXECUTION_BACKEND", "db").lower()
+# Default: "celery" in production when a Redis broker is configured (durable,
+# async — SC-1 hardening); otherwise "db" (no broker required, dev/demo).
+_has_broker = bool(os.environ.get("CELERY_BROKER_URL") or os.environ.get("REDIS_URL"))
+_backend_default = "celery" if (not DEBUG and _has_broker) else "db"
+EXECUTION_BACKEND = os.environ.get("EXECUTION_BACKEND", _backend_default).lower()
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
@@ -282,6 +297,50 @@ CELERY_TASK_ALWAYS_EAGER = (
     or "test" in sys.argv
 )
 CELERY_TASK_EAGER_PROPAGATES = True
+
+# ── Scheduled maintenance (OE-1) ──────────────────────────────────────────────
+# Celery beat drains the operational batch jobs that previously required external
+# cron. Runs only where a beat process is started (Procfile/render.yaml).
+CELERY_BEAT_SCHEDULE = {
+    "recover-stale-runs": {"task": "controlplane.maintenance", "schedule": 300.0, "args": ("recover_stale",)},
+    "compute-budgets": {"task": "controlplane.maintenance", "schedule": 3600.0, "args": ("compute_budgets",)},
+    "compute-baselines": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("compute_baselines",)},
+    "enforce-retention": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("enforce_retention",)},
+    "purge-expired-memory": {"task": "controlplane.maintenance", "schedule": 3600.0, "args": ("purge_memory",)},
+    "export-spans": {"task": "controlplane.maintenance", "schedule": 60.0, "args": ("export_spans",)},
+}
+
+# ── Email / notifications (UX-2) ──────────────────────────────────────────────
+# SMTP is configured entirely from env; unset EMAIL_HOST ⇒ console backend (dev).
+if os.environ.get("EMAIL_HOST"):
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.environ["EMAIL_HOST"]
+    EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+    EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+    EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True").lower() in ("true", "1", "yes")
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "agentic-platform@localhost")
+
+# ── Operational alert delivery (OE-3) ─────────────────────────────────────────
+# Budget/quality/dead-letter alerts fan out to these sinks (both optional).
+ALERT_EMAIL_RECIPIENTS = [
+    e.strip() for e in os.environ.get("ALERT_EMAIL_RECIPIENTS", "").split(",") if e.strip()
+]
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")  # e.g. Teams/Slack incoming webhook
+
+# ── OTLP span export (SC-2) ───────────────────────────────────────────────────
+# When set, the export_spans job POSTs unexported OtelSpan rows as OTLP/HTTP JSON
+# to <endpoint>/v1/traces and marks them exported.
+OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+OTEL_EXPORTER_OTLP_HEADERS = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")  # "k=v,k2=v2"
+OTEL_SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "agentic-platform")
+
+# ── Connector config encryption at rest (GV-2) ────────────────────────────────
+# Fernet key (urlsafe base64, 32 bytes) used to encrypt DataConnector.config
+# values. Unset ⇒ configs stored as plaintext JSON (dev/demo only).
+CONNECTOR_CONFIG_ENCRYPTION_KEY = os.environ.get("CONNECTOR_CONFIG_ENCRYPTION_KEY", "")
 
 # Max independent workflow tasks the orchestrator runs concurrently per wave
 # (1 = sequential — the pre-hardening behaviour).

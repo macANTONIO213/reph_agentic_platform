@@ -16,3 +16,4 @@ sqlalchemy>=2.0        # C3 SQL connector
 # Phase 0 — Durable execution
 celery[redis]>=5.4     # Durable async execution backend (workflows + A2A tasks)
 redis>=5.0             # Celery broker / result backend
+cryptography>=43.0    # Fernet encryption for DataConnector.config at rest (GV-2)

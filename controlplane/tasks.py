@@ -46,6 +46,32 @@ def execute_workflow_run(self, run_id: str) -> dict:
     return {"run_id": run_id, "status": run.status}
 
 
+@shared_task(name="controlplane.maintenance", bind=True, max_retries=0)
+def maintenance(self, job: str) -> dict:
+    """
+    Scheduled operational jobs (OE-1) — dispatched by Celery beat
+    (``CELERY_BEAT_SCHEDULE``) so retention/budgets/baselines/recovery no longer
+    depend on external cron. Each job reuses the existing command/service code.
+    """
+    from django.core.management import call_command
+
+    if job == "recover_stale":
+        from controlplane.services.workflow_queue import workflow_queue
+
+        recovered = workflow_queue.recover_stale_running_runs()
+        stale_tasks = workflow_queue.recover_stale_working_tasks()
+        return {"job": job, "runs": recovered, "tasks": stale_tasks}
+    if job == "purge_memory":
+        from controlplane.services.memory import memory_service
+
+        return {"job": job, "purged": memory_service.purge_expired()}
+    if job in ("compute_budgets", "compute_baselines", "enforce_retention", "export_spans"):
+        call_command(job)
+        return {"job": job, "status": "ok"}
+    logger.warning("maintenance: unknown job %r", job)
+    return {"job": job, "status": "unknown"}
+
+
 @shared_task(
     name="controlplane.execute_agent_task",
     bind=True,

@@ -95,4 +95,12 @@ urlpatterns = [
     path("factory/agents/<uuid:agent_id>/tool-bindings/promote/", views.factory_tool_bindings_promote, name="api_factory_tool_bindings_promote"),
     path("factory/packages/",                          views.factory_packages_list,              name="api_factory_packages_list"),
     path("factory/packages/<uuid:package_id>/",        views.factory_package_detail,             name="api_factory_package_detail"),
+    # UX-2: In-app notifications
+    path("notifications/",                             views.notifications_list,      name="api_notifications_list"),
+    path("notifications/read/",                        views.notifications_mark_read, name="api_notifications_mark_read"),
+    # OE-4: Dead-letter operations
+    path("ops/dead-letters/",                          views.ops_dead_letters,        name="api_ops_dead_letters"),
+    path("ops/dead-letters/<uuid:run_id>/requeue/",    views.ops_dead_letter_requeue, name="api_ops_dead_letter_requeue"),
+    # IN-1: OpenAPI description
+    path("openapi.json",                               views.openapi_spec,            name="api_openapi_spec"),
 ]

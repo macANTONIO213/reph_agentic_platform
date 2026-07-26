@@ -25,6 +25,7 @@ from controlplane.security import (
     can_access_agent as _can_access_agent,
     can_access_business_unit as _can_access_business_unit,
     can_access_workflow_run as _can_access_workflow_run,
+    has_role,
     is_cross_tenant as _is_cross_tenant,
     package_business_unit_id as _package_business_unit_id,
     require_role_json,
@@ -392,7 +393,7 @@ def feedback_low_rated(request):
 def governance_decide(request, review_id):
     from django.shortcuts import get_object_or_404
     from controlplane.models import GovernanceReview
-    if not (request.user.is_staff or request.user.groups.filter(name__in=["agent_approver", "platform_admin"]).exists()):
+    if not has_role(request.user, "agent_approver", "platform_admin"):
         return JsonResponse({"error": "Approver role required."}, status=403)
 
     review = get_object_or_404(GovernanceReview, id=review_id, status=GovernanceReview.Status.PENDING)
@@ -428,7 +429,7 @@ def governance_decide(request, review_id):
 @require_POST
 def agent_transition(request, agent_id):
     from django.shortcuts import get_object_or_404
-    if not (request.user.is_staff or request.user.groups.filter(name="platform_admin").exists()):
+    if not has_role(request.user, "platform_admin"):
         return JsonResponse({"error": "Platform admin role required."}, status=403)
 
     agent = get_object_or_404(Agent, id=agent_id)
@@ -464,7 +465,7 @@ def agent_transition(request, agent_id):
 # ── Approvals (Phase A governance) ────────────────────────────────────────────
 
 def _is_approver(user) -> bool:
-    return user.is_staff or user.groups.filter(name="agent_approver").exists()
+    return has_role(user, "agent_approver")
 
 
 @login_required
@@ -663,13 +664,8 @@ def eval_run_suite(request, suite_id):
     """POST /api/v1/evals/<suite_id>/run/ — trigger an eval run."""
     from django.shortcuts import get_object_or_404
     from controlplane.services.eval_service import eval_service
-    if not (request.user.is_staff or request.user.groups.filter(
-            name__in=["platform_admin", "agent_approver"]).exists()):
-        # Also allow via UserProfile role
-        from controlplane.models import UserProfile as _UP
-        role = _UP.objects.filter(user=request.user).values_list("role", flat=True).first()
-        if role not in ("platform_admin", "agent_approver"):
-            return JsonResponse({"error": "Approver or admin role required to run evals."}, status=403)
+    if not has_role(request.user, "platform_admin", "agent_approver"):
+        return JsonResponse({"error": "Approver or admin role required to run evals."}, status=403)
 
     suite = get_object_or_404(EvalSuite, id=suite_id)
     # IDOR guard: an approver in one BU must not run evals against an agent in
@@ -2517,3 +2513,167 @@ def factory_package_detail(request, package_id):
         return JsonResponse({"deleted": True, "id": pkg_id_str}, status=200)
 
     return JsonResponse({"error": "Method not allowed."}, status=405)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UX-2: In-app notifications
+# ──────────────────────────────────────────────────────────────────────────────
+
+@login_required
+def notifications_list(request):
+    """GET /api/v1/notifications/ — the caller's latest notifications + unread count."""
+    from controlplane.models import Notification
+
+    qs = Notification.objects.filter(user=request.user)
+    unread = qs.filter(read_at__isnull=True).count()
+    items = [
+        {
+            "id": str(n.id),
+            "category": n.category,
+            "title": n.title,
+            "body": n.body,
+            "link": n.link,
+            "read": n.read_at is not None,
+            "created_at": n.created_at.isoformat(),
+        }
+        for n in qs[:50]
+    ]
+    return JsonResponse({"unread": unread, "notifications": items})
+
+
+@login_required
+@require_POST
+def notifications_mark_read(request):
+    """POST /api/v1/notifications/read/ — body {"id": "<uuid>"} or {"all": true}."""
+    from django.utils import timezone as _tz
+
+    from controlplane.models import Notification
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    qs = Notification.objects.filter(user=request.user, read_at__isnull=True)
+    if not body.get("all"):
+        notif_id = body.get("id", "")
+        if not notif_id:
+            return JsonResponse({"error": "Provide 'id' or 'all': true."}, status=400)
+        qs = qs.filter(id=notif_id)
+    updated = qs.update(read_at=_tz.now())
+    return JsonResponse({"marked_read": updated})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OE-4: Dead-letter operations
+# ──────────────────────────────────────────────────────────────────────────────
+
+@login_required
+def ops_dead_letters(request):
+    """GET /api/v1/ops/dead-letters/ — parked poison work (platform_admin)."""
+    denied = require_role_json(request, "platform_admin")
+    if denied:
+        return denied
+    from controlplane.services.workflow_queue import workflow_queue
+
+    data = workflow_queue.list_dead_letters()
+    return JsonResponse({
+        "workflow_runs": [
+            {
+                "id": str(r.id),
+                "workflow": getattr(r.workflow, "name", ""),
+                "attempts": r.attempts,
+                "error": r.error,
+                "updated_at": r.updated_at.isoformat(),
+            }
+            for r in data["workflow_runs"]
+        ],
+        "agent_tasks": [
+            {
+                "id": str(t.id),
+                "agent": getattr(t.agent, "slug", ""),
+                "attempts": t.attempts,
+                "error": t.error,
+                "updated_at": t.updated_at.isoformat(),
+            }
+            for t in data["agent_tasks"]
+        ],
+    })
+
+
+@login_required
+@require_POST
+def ops_dead_letter_requeue(request, run_id):
+    """POST /api/v1/ops/dead-letters/<run_id>/requeue/ — fresh attempts (platform_admin)."""
+    denied = require_role_json(request, "platform_admin")
+    if denied:
+        return denied
+    from django.shortcuts import get_object_or_404
+
+    from controlplane.models import AuditLog, WorkflowRun
+    from controlplane.services.workflow_queue import workflow_queue
+
+    run = get_object_or_404(WorkflowRun, id=run_id)
+    try:
+        run = workflow_queue.requeue_dead_letter(run)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    AuditLog.objects.create(
+        actor=request.user.username,
+        action="workflow_run.dead_letter_requeued",
+        resource_type="WorkflowRun",
+        resource_id=str(run.id),
+        payload={},
+    )
+    return JsonResponse({"id": str(run.id), "status": run.status})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IN-1: OpenAPI description (generated from the live URLconf)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_MUTATING_HINTS = (
+    "decide", "transition", "register", "run", "approve", "build", "publish",
+    "sync", "scan", "execute", "promote", "ingest", "requeue", "read", "external",
+)
+
+
+@login_required
+def openapi_spec(request):
+    """
+    GET /api/v1/openapi.json — machine-readable inventory of the v1 surface.
+
+    Generated from the URLconf: paths and parameters are authoritative; the
+    method is a naming heuristic until per-view schemas are added.
+    """
+    import re as _re
+
+    from controlplane.api import urls as _api_urls
+
+    paths: dict = {}
+    for p in _api_urls.urlpatterns:
+        route = "/api/v1/" + str(p.pattern)
+        route = _re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", route)
+        params = _re.findall(r"\{([^}]+)\}", route)
+        method = "post" if any(h in route for h in _MUTATING_HINTS) else "get"
+        paths[route] = {
+            method: {
+                "operationId": p.name or route,
+                "parameters": [
+                    {"name": n, "in": "path", "required": True, "schema": {"type": "string"}}
+                    for n in params
+                ],
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+    return JsonResponse({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Agentic Platform API",
+            "version": "v1",
+            "description": "Session-cookie or X-API-Key authenticated JSON API.",
+        },
+        "components": {"securitySchemes": {"apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}},
+        "security": [{"apiKey": []}],
+        "paths": paths,
+    })

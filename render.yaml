@@ -43,7 +43,9 @@ services:
     name: reph-agentic-worker
     runtime: python
     buildCommand: pip install -r requirements.txt -c constraints.txt
-    startCommand: celery -A agentic_platform worker --loglevel=info --concurrency=4 --max-tasks-per-child=200
+    # -B embeds the beat scheduler (OE-1: retention/budgets/baselines/recovery/
+    # span export) — safe while this is a single worker instance.
+    startCommand: celery -A agentic_platform worker -B --loglevel=info --concurrency=4 --max-tasks-per-child=200
     envVars:
       - key: DJANGO_SECRET_KEY
         fromService:

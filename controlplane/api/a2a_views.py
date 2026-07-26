@@ -150,6 +150,13 @@ def _task_to_a2a(task) -> dict:
 def _caller_label(request) -> str:
     if request.user.is_authenticated:
         return f"a2a:user:{request.user.username}"
+    # Distinguish external consumers by a digest of their bearer token so one
+    # consumer cannot poll another's task output by UUID (audit S-07).
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        import hashlib
+
+        return "a2a:token:" + hashlib.sha256(auth[7:].encode()).hexdigest()[:12]
     return "a2a:external"
 
 
@@ -217,7 +224,14 @@ def rpc(request, slug):
 
     if method == "tasks/get":
         task_id = params.get("id")
-        task = AsyncAgentTask.objects.filter(id=task_id, agent=agent).first() if task_id else None
+        # Scope to the submitting caller — agent-only scoping let any consumer
+        # read any task by UUID (audit S-07 IDOR).
+        task = (
+            AsyncAgentTask.objects.filter(
+                id=task_id, agent=agent, submitted_by=_caller_label(request)
+            ).first()
+            if task_id else None
+        )
         if task is None:
             return _rpc_error(rpc_id, -32004, "Task not found.", http_status=404)
         return _rpc_result(rpc_id, _task_to_a2a(task))

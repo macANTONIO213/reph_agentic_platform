@@ -115,6 +115,15 @@ class Command(BaseCommand):
                 agent.quality_alert = should_alert
                 agent.save(update_fields=["quality_alert", "updated_at"])
 
+                if should_alert:
+                    from controlplane.services.alerts import send_alert
+
+                    send_alert(
+                        f"Quality drift: {agent.slug}",
+                        f"Satisfaction {recent_score:.2f} is {abs(delta):.2f} below the "
+                        f"7-day baseline {baseline_score:.2f}.",
+                        category="quality",
+                    )
                 action = "quality.drift_detected" if should_alert else "quality.drift_resolved"
                 AuditLog.objects.create(
                     actor="system:compute_baselines",

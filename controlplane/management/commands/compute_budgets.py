@@ -96,6 +96,15 @@ class Command(BaseCommand):
                     )
                     agent.budget_alert = True
                     agent.save(update_fields=["budget_alert"])
+                    from controlplane.services.alerts import send_alert
+
+                    send_alert(
+                        f"Budget breach: {agent.slug}",
+                        f"Month-to-date ${float(total):.2f} exceeds the "
+                        f"${float(agent.budget_usd_monthly):.2f} monthly cap "
+                        f"(overage ${float(overage):.2f}, period {period}).",
+                        category="budget",
+                    )
 
             elif not over_budget and agent.budget_alert:
                 self.stdout.write(self.style.WARNING(f"RESOLVED {line}"))

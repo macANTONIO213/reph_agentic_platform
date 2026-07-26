@@ -147,6 +147,13 @@ class WorkflowQueueService:
                     run.completed_at = timezone.now()
                     run.save(update_fields=["status", "error", "completed_at", "updated_at"])
                     logger.error("Workflow run %s dead-lettered after %s attempts", run.id, run.attempts)
+                    from controlplane.services.alerts import send_alert
+
+                    send_alert(
+                        f"Workflow run dead-lettered: {run.id}",
+                        run.error,
+                        category="ops",
+                    )
                 else:
                     run.status = WorkflowRun.Status.PENDING
                     run.error = (
@@ -191,6 +198,13 @@ class WorkflowQueueService:
                     task.completed_at = timezone.now()
                     task.save(update_fields=["state", "error", "completed_at", "updated_at"])
                     logger.error("Async task %s dead-lettered after %s attempts", task.id, task.attempts)
+                    from controlplane.services.alerts import send_alert
+
+                    send_alert(
+                        f"Agent task dead-lettered: {task.id}",
+                        task.error,
+                        category="ops",
+                    )
                 else:
                     task.state = AsyncAgentTask.State.SUBMITTED
                     task.error = (

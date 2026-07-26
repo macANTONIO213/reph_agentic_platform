@@ -160,12 +160,56 @@ class EmbeddingService:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _pg_search(self, query_vec: list[float], top_k: int, bu_id) -> list[dict]:
-        """Use pgvector <=> operator for cosine distance search."""
-        from controlplane.models import AgentEmbedding
-        # pgvector stores vectors natively; we stored as JSON — convert
-        # For now use Python path until pgvector column migration is added.
-        # (Phase C1 uses JSON storage compatible with both backends.)
-        return self._python_search(query_vec, top_k, bu_id)
+        """
+        In-database cosine search via pgvector's ``<=>`` operator (AI-1a).
+
+        Vectors stay in the JSON column (backend-portable storage); Postgres
+        casts them at query time (``jsonb::text::vector`` is valid pgvector
+        input). Requires ``CREATE EXTENSION vector`` — any failure (extension
+        missing, dimension mismatch) falls back to the Python cosine path.
+        """
+        from django.db import connection
+
+        from controlplane.models import Agent
+
+        vec_literal = "[" + ",".join(f"{v:.8f}" for v in query_vec) + "]"
+        sql = (
+            "SELECT e.agent_id, 1 - ((e.vector::text)::vector <=> %s::vector) AS score "
+            "FROM controlplane_agentembedding e "
+            "JOIN controlplane_agent a ON a.id = e.agent_id "
+            "WHERE a.status IN ('draft','review','pilot','production') "
+        )
+        params: list = [vec_literal]
+        if bu_id:
+            sql += "AND a.org_unit_id = %s "
+            params.append(str(bu_id))
+        sql += "ORDER BY (e.vector::text)::vector <=> %s::vector LIMIT %s"
+        params += [vec_literal, int(top_k)]
+
+        try:
+            with connection.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        except Exception as exc:
+            logger.info("pgvector search unavailable (%s); using Python cosine fallback", exc)
+            return self._python_search(query_vec, top_k, bu_id)
+
+        agents = {a.id: a for a in Agent.objects.filter(id__in=[r[0] for r in rows])}
+        results = []
+        for agent_id, score in rows:
+            a = agents.get(agent_id)
+            if a is None:
+                continue
+            results.append({
+                "agent_id": str(a.id),
+                "name": a.name,
+                "purpose": a.purpose,
+                "status": a.status,
+                "risk_tier": a.risk_tier,
+                "business_unit": a.business_unit,
+                "score": round(float(score), 4),
+            })
+        return results
 
     def _python_search(self, query_vec: list[float], top_k: int, bu_id) -> list[dict]:
         from controlplane.models import AgentEmbedding

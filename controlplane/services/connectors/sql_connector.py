@@ -53,9 +53,10 @@ class SqlConnector:
 
     def query(self, sql: str, actor: str = "unknown", max_rows: int = _MAX_ROWS) -> dict:
         self._assert_circuit_closed()
-        allowed_schema = (self.connector.config or {}).get("schema", "")
+        _cfg = self.connector.plain_config
+        allowed_schema = _cfg.get("schema", "")
         self._validate(sql, allowed_schema=allowed_schema)
-        url = self.connector.config.get("url", "")
+        url = _cfg.get("url", "")
         if not url:
             raise SqlConnectorError(f"Connector '{self.connector.name}' has no 'url' in config.")
 

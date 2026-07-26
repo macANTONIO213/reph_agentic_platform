@@ -46,6 +46,20 @@ def _new_span_id() -> str:
     return secrets.token_hex(8)  # 16-char hex
 
 
+def _root_span_id(trace_id: str) -> str:
+    """Span id of the trace's root span (empty string when none exists yet)."""
+    from controlplane.models import OtelSpan
+    try:
+        return (
+            OtelSpan.objects.filter(trace_id=trace_id, parent_span_id="")
+            .order_by("created_at")
+            .values_list("span_id", flat=True)
+            .first()
+        ) or ""
+    except Exception:
+        return ""
+
+
 class _SpanContext:
     """Mutable context passed through a with-block."""
     def __init__(self, span):
@@ -166,7 +180,7 @@ class TelemetryService:
             span = OtelSpan.objects.create(
                 trace_id=trace_id,
                 span_id=span_id,
-                parent_span_id=_new_span_id(),   # root span_id isn't tracked in ctx; good enough
+                parent_span_id=_root_span_id(trace_id),  # link to the real trace root
                 name=name,
                 kind=OtelSpan.Kind.INTERNAL,
                 start_time=start,
@@ -354,10 +368,11 @@ class TelemetryService:
             now = _now()
             from datetime import timedelta
             start = now - timedelta(milliseconds=duration_ms)
+            trace_id = _trace_id_from_run(run.id)
             OtelSpan.objects.create(
-                trace_id=_trace_id_from_run(run.id),
+                trace_id=trace_id,
                 span_id=_new_span_id(),
-                parent_span_id=_new_span_id(),
+                parent_span_id=_root_span_id(trace_id),
                 name=name,
                 kind=OtelSpan.Kind.INTERNAL,
                 start_time=start,

@@ -43,8 +43,9 @@ class RestConnectorError(RuntimeError):
 class RestConnector:
     def __init__(self, connector):
         self.connector = connector
-        self._base_url = connector.config.get("base_url", "").rstrip("/")
-        self._auth_header = connector.config.get("auth_header", "")
+        _cfg = connector.plain_config
+        self._base_url = _cfg.get("base_url", "").rstrip("/")
+        self._auth_header = _cfg.get("auth_header", "")
 
     def get(self, path: str, params: dict | None = None, actor: str = "unknown") -> dict:
         url = self._build_url(path, params)

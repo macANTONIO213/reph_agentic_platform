@@ -339,8 +339,8 @@ def _staff_required(view_fn):
     @_lr
     @wraps(view_fn)
     def wrapper(request, *args, **kwargs):
-        is_platform_admin = request.user.groups.filter(name="platform_admin").exists()
-        if not (request.user.is_staff or is_platform_admin):
+        from controlplane.security import has_role
+        if not has_role(request.user, "platform_admin"):
             from django.http import HttpResponseForbidden
             return HttpResponseForbidden("Platform admin or staff access required.")
         return view_fn(request, *args, **kwargs)

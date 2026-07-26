@@ -631,7 +631,10 @@ class DocumentChunk(models.Model):
 class DataConnector(models.Model):
     """
     A registered data source an agent can query at runtime.
-    Connection config is encrypted-at-rest in production (env-var key recommended).
+
+    ``config`` is encrypted at rest with Fernet when
+    ``CONNECTOR_CONFIG_ENCRYPTION_KEY`` is set (GV-2); otherwise it is stored as
+    plaintext JSON (dev/demo only). Read via ``plain_config``, never ``config``.
     """
     class ConnectorType(models.TextChoices):
         SQL      = "sql",      "SQL Database"
@@ -665,6 +668,19 @@ class DataConnector(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.connector_type})"
+
+    @property
+    def plain_config(self) -> dict:
+        """Decrypted connection config — the only sanctioned read path."""
+        from controlplane.services.crypto import decrypt_config
+
+        return decrypt_config(self.config)
+
+    def save(self, *args, **kwargs):
+        from controlplane.services.crypto import encrypt_config
+
+        self.config = encrypt_config(self.config)
+        return super().save(*args, **kwargs)
 
 
 class RemoteMcpServer(models.Model):
@@ -1807,3 +1823,50 @@ class AuditLog(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValueError("AuditLog is append-only and cannot be deleted.")
+
+
+class Notification(models.Model):
+    """In-app notification (UX-2): operational and governance events per user."""
+    class Category(models.TextChoices):
+        GOVERNANCE = "governance", "Governance"
+        BUDGET = "budget", "Budget"
+        QUALITY = "quality", "Quality"
+        OPS = "ops", "Operations"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
+    category = models.CharField(max_length=20, choices=Category.choices, default=Category.OPS)
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True, default="")
+    link = models.CharField(max_length=300, blank=True, default="")
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "read_at", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.user} · {self.title}"
+
+
+class ApiKey(models.Model):
+    """
+    Hashed API key for session-less /api/v1 access (IN-1).
+
+    Only the SHA-256 hash is stored; the plaintext key is shown once at creation
+    (``create_api_key`` management command). Requests present it as ``X-API-Key``.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="api_keys")
+    name = models.CharField(max_length=100)
+    key_hash = models.CharField(max_length=64, unique=True)
+    is_active = models.BooleanField(default=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({'active' if self.is_active else 'revoked'})"
