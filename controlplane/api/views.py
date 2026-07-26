@@ -2677,3 +2677,124 @@ def openapi_spec(request):
         "security": [{"apiKey": []}],
         "paths": paths,
     })
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OE-2: Workflow triggers (webhook + schedule management)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from django.views.decorators.csrf import csrf_exempt as _csrf_exempt
+
+
+@_csrf_exempt
+@require_POST
+def workflow_webhook(request, workflow_id, token):
+    """
+    POST /api/v1/workflows/<id>/webhook/<token>/ — event-driven trigger.
+
+    Session-less: authenticated solely by the per-workflow secret token
+    (constant-time compare). Body: {"inputs": {...}} (optional).
+    """
+    import hmac as _hmac
+
+    from controlplane.models import Workflow
+    from controlplane.services.workflow_queue import workflow_queue
+
+    w = Workflow.objects.filter(id=workflow_id, status=Workflow.Status.ACTIVE).first()
+    if w is None or not w.webhook_token or not _hmac.compare_digest(w.webhook_token, token):
+        return JsonResponse({"error": "Not found."}, status=404)
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        body = {}
+    run = workflow_queue.enqueue(
+        w,
+        inputs=body.get("inputs", {}),
+        triggered_by="webhook",
+        idempotency_key=body.get("idempotency_key") or None,
+    )
+    return JsonResponse({"workflow_run_id": str(run.id), "status": run.status}, status=202)
+
+
+@login_required
+@require_POST
+def workflow_webhook_rotate(request, workflow_id):
+    """POST /api/v1/workflows/<id>/webhook/rotate/ — (re)issue the webhook token."""
+    denied = require_role_json(request, "platform_admin")
+    if denied:
+        return denied
+    import secrets as _secrets
+
+    from django.shortcuts import get_object_or_404
+
+    from controlplane.models import Workflow
+
+    w = get_object_or_404(Workflow, id=workflow_id)
+    w.webhook_token = _secrets.token_urlsafe(24)
+    w.save(update_fields=["webhook_token", "updated_at"])
+    AuditLog.objects.create(
+        actor=request.user.username,
+        action="workflow.webhook_rotated",
+        resource_type="Workflow",
+        resource_id=str(w.id),
+        payload={},
+    )
+    return JsonResponse({
+        "webhook_url": f"/api/v1/workflows/{w.id}/webhook/{w.webhook_token}/",
+    })
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AR-1: Cost & usage summary with burn forecast
+# ──────────────────────────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def costs_summary(request):
+    """
+    GET /api/v1/costs/summary/ — MTD spend per BU and per agent + naive
+    linear month-end forecast. Tenant-scoped for non-cross-tenant callers.
+    """
+    import calendar
+
+    now = timezone.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    elapsed = max((now - month_start).total_seconds() / 86400, 0.04)
+
+    runs = AgentRun.objects.filter(started_at__gte=month_start, status="completed")
+    if not _is_cross_tenant(request.user):
+        runs = runs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+
+    def _forecast(mtd: float) -> float:
+        return round(mtd / elapsed * days_in_month, 2)
+
+    by_agent = [
+        {
+            "agent": r["agent__slug"],
+            "business_unit": r["agent__business_unit"],
+            "runs": r["n"],
+            "cost_mtd_usd": float(r["c"] or 0),
+            "forecast_month_usd": _forecast(float(r["c"] or 0)),
+        }
+        for r in runs.values("agent__slug", "agent__business_unit")
+        .annotate(n=Count("id"), c=Sum("cost_usd"))
+        .order_by("-c")[:100]
+    ]
+    total = float(runs.aggregate(c=Sum("cost_usd"))["c"] or 0)
+    by_bu: dict = {}
+    for row in by_agent:
+        bu = row["business_unit"] or "(unassigned)"
+        by_bu.setdefault(bu, {"cost_mtd_usd": 0.0, "runs": 0})
+        by_bu[bu]["cost_mtd_usd"] = round(by_bu[bu]["cost_mtd_usd"] + row["cost_mtd_usd"], 4)
+        by_bu[bu]["runs"] += row["runs"]
+    for bu in by_bu.values():
+        bu["forecast_month_usd"] = _forecast(bu["cost_mtd_usd"])
+
+    return JsonResponse({
+        "period": now.strftime("%Y-%m"),
+        "total_mtd_usd": round(total, 4),
+        "total_forecast_usd": _forecast(total),
+        "by_business_unit": by_bu,
+        "by_agent": by_agent,
+    })

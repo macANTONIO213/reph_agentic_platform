@@ -78,8 +78,11 @@ class AgentAdapter(ABC):
             },
         ).to_sse()
 
-    def _emit_tokens(self, text: str, delay: float = 0.015) -> Generator[str, None, None]:
+    def _emit_tokens(self, text: str, delay: float = 0.0) -> Generator[str, None, None]:
+        # UX-6: no artificial pacing — a blocked worker thread per run was pure
+        # waste. delay is kept only for callers that explicitly want throttling.
         for chunk in re.split(r"(\s+)", text):
             if chunk:
                 yield RuntimeEvent("token", {"text": chunk}).to_sse()
-                time.sleep(delay)
+                if delay > 0:
+                    time.sleep(delay)

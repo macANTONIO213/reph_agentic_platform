@@ -17,3 +17,4 @@ sqlalchemy>=2.0        # C3 SQL connector
 celery[redis]>=5.4     # Durable async execution backend (workflows + A2A tasks)
 redis>=5.0             # Celery broker / result backend
 cryptography>=43.0    # Fernet encryption for DataConnector.config at rest (GV-2)
+mozilla-django-oidc>=5.0   # Enterprise SSO via OIDC (UX-3, env-gated)

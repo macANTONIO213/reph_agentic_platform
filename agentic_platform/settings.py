@@ -308,6 +308,11 @@ CELERY_BEAT_SCHEDULE = {
     "enforce-retention": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("enforce_retention",)},
     "purge-expired-memory": {"task": "controlplane.maintenance", "schedule": 3600.0, "args": ("purge_memory",)},
     "export-spans": {"task": "controlplane.maintenance", "schedule": 60.0, "args": ("export_spans",)},
+    # Phase 2 additions
+    "dispatch-scheduled-workflows": {"task": "controlplane.maintenance", "schedule": 60.0, "args": ("dispatch_scheduled",)},
+    "check-slos": {"task": "controlplane.maintenance", "schedule": 900.0, "args": ("check_slos",)},
+    "daily-digest": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("send_digest",)},
+    "export-evidence": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("export_evidence",)},
 }
 
 # ── Email / notifications (UX-2) ──────────────────────────────────────────────
@@ -336,6 +341,33 @@ ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")  # e.g. Teams/Slack 
 OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 OTEL_EXPORTER_OTLP_HEADERS = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")  # "k=v,k2=v2"
 OTEL_SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "agentic-platform")
+
+# ── Enterprise SSO via OIDC (UX-3) ────────────────────────────────────────────
+# Enabled by setting OIDC_RP_CLIENT_ID (+ the OP endpoints, e.g. Entra ID:
+# https://login.microsoftonline.com/<tenant>/v2.0/...). Local accounts keep
+# working — the OIDC backend is additive.
+OIDC_ENABLED = bool(os.environ.get("OIDC_RP_CLIENT_ID"))
+if OIDC_ENABLED:
+    INSTALLED_APPS.append("mozilla_django_oidc")
+    AUTHENTICATION_BACKENDS = [
+        "django.contrib.auth.backends.ModelBackend",
+        "mozilla_django_oidc.auth.OIDCAuthenticationBackend",
+    ]
+    OIDC_RP_CLIENT_ID = os.environ["OIDC_RP_CLIENT_ID"]
+    OIDC_RP_CLIENT_SECRET = os.environ.get("OIDC_RP_CLIENT_SECRET", "")
+    OIDC_RP_SIGN_ALGO = os.environ.get("OIDC_RP_SIGN_ALGO", "RS256")
+    OIDC_OP_AUTHORIZATION_ENDPOINT = os.environ.get("OIDC_OP_AUTHORIZATION_ENDPOINT", "")
+    OIDC_OP_TOKEN_ENDPOINT = os.environ.get("OIDC_OP_TOKEN_ENDPOINT", "")
+    OIDC_OP_USER_ENDPOINT = os.environ.get("OIDC_OP_USER_ENDPOINT", "")
+    OIDC_OP_JWKS_ENDPOINT = os.environ.get("OIDC_OP_JWKS_ENDPOINT", "")
+
+# ── Guardrails 2.0 (AI-3) ─────────────────────────────────────────────────────
+# Optional LLM second-layer injection classifier (runs only when the regex layer
+# is clean; fail-open). Requires ANTHROPIC_API_KEY.
+GUARDRAILS_LLM_CLASSIFIER = os.environ.get("GUARDRAILS_LLM_CLASSIFIER", "").lower() in ("true", "1", "yes")
+GUARDRAILS_CLASSIFIER_MODEL = os.environ.get("GUARDRAILS_CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
+# AI-2: model used by the eval LLM-as-judge (fail-open augmentation).
+EVAL_JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "claude-haiku-4-5-20251001")
 
 # ── Connector config encryption at rest (GV-2) ────────────────────────────────
 # Fernet key (urlsafe base64, 32 bytes) used to encrypt DataConnector.config

@@ -782,6 +782,11 @@ class EvalSuite(models.Model):
         default=True,
         help_text="Only one active suite per agent is checked at gate time.",
     )
+    # AI-2: cases with a judge_prompt are additionally graded by an LLM judge.
+    use_llm_judge = models.BooleanField(
+        default=False,
+        help_text="Grade cases with a judge_prompt via LLM (falls back to deterministic scoring).",
+    )
     created_by = models.CharField(max_length=120, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -816,6 +821,10 @@ class EvalCase(models.Model):
     max_latency_ms = models.PositiveIntegerField(
         null=True, blank=True,
         help_text="Optional maximum acceptable latency in milliseconds.",
+    )
+    judge_prompt = models.TextField(
+        blank=True, default="",
+        help_text="AI-2: grading criteria for the LLM judge (blank = deterministic only).",
     )
     weight = models.PositiveSmallIntegerField(
         default=1,
@@ -993,6 +1002,12 @@ class Workflow(models.Model):
     status      = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
     owner       = models.CharField(max_length=120, blank=True)
     created_by  = models.CharField(max_length=120, blank=True)
+    # OE-2: unattended triggers. webhook_token empty ⇒ webhook disabled;
+    # run_interval_minutes 0 ⇒ no schedule. next_run_at is advanced by the
+    # dispatch_scheduled beat job.
+    webhook_token        = models.CharField(max_length=64, blank=True, default="")
+    run_interval_minutes = models.PositiveIntegerField(default=0)
+    next_run_at          = models.DateTimeField(null=True, blank=True)
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 
@@ -1870,3 +1885,26 @@ class ApiKey(models.Model):
 
     def __str__(self):
         return f"{self.name} ({'active' if self.is_active else 'revoked'})"
+
+
+class PlatformConfig(models.Model):
+    """
+    DB-managed policy configuration (GV-5) — change platform policy without a
+    code deploy. Known keys:
+
+      - ``allowed_model_ids``: list[str] merged into the static allowlist.
+      - ``guardrail_rules``: list of {"id","severity","pattern","detail"} regex
+        rules evaluated alongside the built-in set.
+    """
+    key = models.CharField(max_length=80, primary_key=True)
+    value = models.JSONField(default=dict, blank=True)
+    updated_by = models.CharField(max_length=120, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.key
+
+    @classmethod
+    def get(cls, key: str, default=None):
+        row = cls.objects.filter(key=key).first()
+        return row.value if row is not None else default

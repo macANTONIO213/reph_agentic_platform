@@ -408,3 +408,133 @@ def manage_panel(request):
         "now": now,
     }
     return render(request, "controlplane/manage.html", context)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UX-1 wave 1: Unified operations console (/console/)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@login_required
+@ensure_csrf_cookie
+def console(request):
+    """
+    Server-rendered ops console: approvals inbox (with in-flow review request),
+    workflows (run), evals (run), costs, notifications. Role- and tenant-aware.
+    """
+    from django.contrib import messages
+    from django.shortcuts import redirect
+
+    from .models import EvalSuite, Notification, Workflow, WorkflowRun
+    from .security import can_access_agent, can_access_business_unit, has_role
+
+    is_approver = has_role(request.user, "agent_approver", "platform_admin")
+    is_builder = has_role(request.user, "agent_builder", "agent_approver", "platform_admin")
+    cross = _is_cross_tenant(request.user)
+    bu_id = None if cross else _user_business_unit_id(request.user)
+
+    if request.method == "POST":
+        action = request.POST.get("action", "")
+        try:
+            if action == "request_review" and is_builder:
+                agent = get_object_or_404(Agent, id=request.POST["agent_id"])
+                if not can_access_agent(request.user, agent):
+                    raise PermissionError("No access to this agent.")
+                if agent.governance_reviews.filter(status="pending").exists():
+                    raise ValueError("A review is already pending for this agent.")
+                GovernanceReview.objects.create(
+                    agent=agent, reviewer="(unassigned)",
+                    notes=f"Review requested by {request.user.username} via console.",
+                )
+                AuditLog.objects.create(
+                    actor=request.user.username, action="governance_review_requested",
+                    resource_type="Agent", resource_id=str(agent.id), payload={},
+                )
+                messages.success(request, f"Review requested for {agent.name}.")
+            elif action == "decide_review" and is_approver:
+                review = get_object_or_404(
+                    GovernanceReview, id=request.POST["review_id"], status="pending"
+                )
+                decision = request.POST.get("decision")
+                if decision not in ("approved", "rejected"):
+                    raise ValueError("Invalid decision.")
+                review.status = decision
+                review.reviewer = request.user.username
+                review.notes = request.POST.get("notes", review.notes)
+                review.completed_at = timezone.now()
+                review.save(update_fields=["status", "reviewer", "notes", "completed_at"])
+                AuditLog.objects.create(
+                    actor=request.user.username, action=f"governance_{decision}",
+                    resource_type="GovernanceReview", resource_id=str(review.id),
+                    payload={"agent": review.agent.name, "via": "console"},
+                )
+                messages.success(request, f"Review {decision}: {review.agent.name}.")
+            elif action == "run_workflow" and is_builder:
+                from .services.workflow_queue import workflow_queue
+
+                w = get_object_or_404(Workflow, id=request.POST["workflow_id"], status="active")
+                if not can_access_business_unit(request.user, w.business_unit_id):
+                    raise PermissionError("No access to this workflow.")
+                run = workflow_queue.enqueue(w, inputs={}, triggered_by=request.user.username)
+                messages.success(request, f"Workflow '{w.name}' queued (run {run.id}).")
+            elif action == "run_eval" and is_approver:
+                from .services.eval_service import eval_service
+
+                suite = get_object_or_404(EvalSuite, id=request.POST["suite_id"])
+                if not can_access_agent(request.user, suite.agent):
+                    raise PermissionError("No access to this suite.")
+                run = eval_service.run_suite(suite=suite, triggered_by=request.user.username)
+                messages.success(
+                    request,
+                    f"Eval '{suite.name}': {run.passed_cases}/{run.total_cases} passed.",
+                )
+            elif action == "mark_read":
+                Notification.objects.filter(
+                    user=request.user, read_at__isnull=True
+                ).update(read_at=timezone.now())
+            else:
+                messages.error(request, "Unknown action or insufficient role.")
+        except (PermissionError, ValueError) as exc:
+            messages.error(request, str(exc))
+        return redirect("controlplane:console")
+
+    agents_qs = Agent.objects.all()
+    reviews_qs = GovernanceReview.objects.filter(status="pending").select_related("agent")
+    workflows_qs = Workflow.objects.filter(status="active")
+    suites_qs = EvalSuite.objects.filter(is_active=True).select_related("agent")
+    if not cross:
+        agents_qs = agents_qs.filter(org_unit_id=bu_id)
+        reviews_qs = reviews_qs.filter(agent__org_unit_id=bu_id)
+        workflows_qs = workflows_qs.filter(business_unit_id=bu_id)
+        suites_qs = suites_qs.filter(agent__org_unit_id=bu_id)
+
+    month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    cost_rows = (
+        AgentRun.objects.filter(started_at__gte=month_start, status="completed",
+                                agent__in=agents_qs)
+        .values("agent__name")
+        .annotate(runs=Count("id"), cost=Sum("cost_usd"))
+        .order_by("-cost")[:10]
+    )
+
+    notifications = Notification.objects.filter(user=request.user)[:20]
+    context = {
+        "is_approver": is_approver,
+        "is_builder": is_builder,
+        "pending_reviews": reviews_qs[:25],
+        "reviewable_agents": agents_qs.filter(status__in=["draft", "review"])[:25] if is_builder else [],
+        "valid_approvals": Approval.objects.filter(
+            is_consumed=False, expires_at__gt=timezone.now(),
+            agent__in=agents_qs,
+        ).select_related("agent")[:25],
+        "workflows": workflows_qs[:25],
+        "recent_runs": WorkflowRun.objects.filter(workflow__in=workflows_qs)
+                       .select_related("workflow").order_by("-updated_at")[:10],
+        "suites": suites_qs[:25],
+        "cost_rows": cost_rows,
+        "cost_total": AgentRun.objects.filter(
+            started_at__gte=month_start, status="completed", agent__in=agents_qs
+        ).aggregate(c=Sum("cost_usd"))["c"] or 0,
+        "notifications": notifications,
+        "unread": Notification.objects.filter(user=request.user, read_at__isnull=True).count(),
+    }
+    return render(request, "controlplane/console.html", context)

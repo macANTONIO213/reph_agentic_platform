@@ -103,4 +103,9 @@ urlpatterns = [
     path("ops/dead-letters/<uuid:run_id>/requeue/",    views.ops_dead_letter_requeue, name="api_ops_dead_letter_requeue"),
     # IN-1: OpenAPI description
     path("openapi.json",                               views.openapi_spec,            name="api_openapi_spec"),
+    # OE-2: workflow triggers
+    path("workflows/<uuid:workflow_id>/webhook/rotate/", views.workflow_webhook_rotate, name="api_workflow_webhook_rotate"),
+    path("workflows/<uuid:workflow_id>/webhook/<str:token>/", views.workflow_webhook,  name="api_workflow_webhook"),
+    # AR-1: costs
+    path("costs/summary/",                             views.costs_summary,           name="api_costs_summary"),
 ]

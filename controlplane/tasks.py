@@ -68,6 +68,22 @@ def maintenance(self, job: str) -> dict:
     if job in ("compute_budgets", "compute_baselines", "enforce_retention", "export_spans"):
         call_command(job)
         return {"job": job, "status": "ok"}
+    if job == "dispatch_scheduled":
+        from controlplane.services.operations import dispatch_scheduled_workflows
+
+        return {"job": job, "dispatched": dispatch_scheduled_workflows()}
+    if job == "check_slos":
+        from controlplane.services.operations import check_slos
+
+        return {"job": job, "breaches": check_slos()}
+    if job == "send_digest":
+        from controlplane.services.operations import send_digest
+
+        return {"job": job, **send_digest()}
+    if job == "export_evidence":
+        from controlplane.services.operations import export_evidence
+
+        return {"job": job, **export_evidence()}
     logger.warning("maintenance: unknown job %r", job)
     return {"job": job, "status": "unknown"}
 

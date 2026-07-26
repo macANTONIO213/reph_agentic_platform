@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
 
@@ -13,3 +14,7 @@ urlpatterns = [
     path("a2a/", include("controlplane.api.a2a_urls")),
     path("", include("controlplane.urls")),
 ]
+
+# UX-3: OIDC SSO endpoints (only when an IdP is configured via env).
+if settings.OIDC_ENABLED:
+    urlpatterns.insert(3, path("oidc/", include("mozilla_django_oidc.urls")))

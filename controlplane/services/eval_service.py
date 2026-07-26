@@ -107,6 +107,13 @@ class EvalService:
             # Score the response
             passed, reasons = self._score(case, response, latency_ms)
 
+            # AI-2: LLM-as-judge augments (never replaces) deterministic scoring.
+            if passed and case.judge_prompt and case.suite.use_llm_judge:
+                verdict = self._llm_judge(case, meta["output_text"])
+                if verdict is not None and not verdict[0]:
+                    passed = False
+                    reasons.append(f"LLM judge: {verdict[1]}")
+
             agent_run.status = AgentRun.Status.COMPLETED
             agent_run.output_text = meta["output_text"]
             agent_run.input_tokens = meta["input_tokens"]
@@ -145,6 +152,47 @@ class EvalService:
                 "weight": case.weight,
                 "run_id": str(agent_run.id),
             }
+
+    @staticmethod
+    def _llm_judge(case: EvalCase, response_text: str) -> tuple[bool, str] | None:
+        """
+        Grade ``response_text`` against ``case.judge_prompt`` with a small LLM
+        (AI-2). Fail-open: any error or missing key returns None and the
+        deterministic result stands.
+        """
+        from django.conf import settings
+
+        api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return None
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=api_key, timeout=30.0, max_retries=0)
+            resp = client.messages.create(
+                model=getattr(settings, "EVAL_JUDGE_MODEL", "claude-haiku-4-5-20251001"),
+                max_tokens=100,
+                system=(
+                    "You are an evaluation judge. Grade the RESPONSE strictly "
+                    "against the CRITERIA. Reply 'PASS' or 'FAIL: <one-line reason>'."
+                ),
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"CRITERIA:\n{case.judge_prompt}\n\n"
+                        f"INPUT:\n{case.input_message[:2000]}\n\n"
+                        f"RESPONSE:\n{response_text[:6000]}"
+                    ),
+                }],
+            )
+            text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+            if text.upper().startswith("PASS"):
+                return True, ""
+            if text.upper().startswith("FAIL"):
+                return False, text[5:].strip(" :") or "criteria not met"
+        except Exception as exc:
+            logger.warning("eval: LLM judge unavailable: %s", exc)
+        return None
 
     @staticmethod
     def _score(case: EvalCase, response_lower: str, latency_ms: int) -> tuple[bool, list[str]]:

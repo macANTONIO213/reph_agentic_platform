@@ -44,6 +44,17 @@ ALLOWED_MODEL_IDS: frozenset[str] = frozenset({
     "bedrock/claude-3-haiku",
 })
 
+
+def allowed_model_ids() -> frozenset[str]:
+    """Static allowlist merged with the DB-managed extension (GV-5)."""
+    try:
+        from controlplane.models import PlatformConfig
+
+        extra = PlatformConfig.get("allowed_model_ids", []) or []
+        return ALLOWED_MODEL_IDS | frozenset(str(m) for m in extra)
+    except Exception:
+        return ALLOWED_MODEL_IDS
+
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -109,10 +120,11 @@ class GovernanceService:
             slug = f"{slug}-{uuid.uuid4().hex[:6]}"
 
         model_id = data.get("model_id", "")
-        if model_id and model_id not in ALLOWED_MODEL_IDS:
+        _allowed = allowed_model_ids()
+        if model_id and model_id not in _allowed:
             raise RegistrationError(
                 f"Model '{model_id}' is not on the platform allowlist. "
-                f"Allowed: {sorted(m for m in ALLOWED_MODEL_IDS if m)}"
+                f"Allowed: {sorted(m for m in _allowed if m)}"
             )
 
         agent = Agent.objects.create(
