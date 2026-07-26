@@ -144,3 +144,71 @@ def export_evidence() -> dict:
         payload={"path": str(path), "sha256": digest},
     )
     return {"path": str(path), "sha256": digest}
+
+
+def factory_feedback() -> int:
+    """
+    AI-6 (start): write runtime telemetry back onto the blueprint that built
+    each agent, closing the discover → build → learn loop. The snapshot feeds
+    the portfolio ranking (/api/v1/factory/portfolio/).
+    """
+    from django.db.models import Avg, Count, Q, Sum
+
+    from controlplane.models import AgentBlueprint, AgentRun
+
+    since = timezone.now() - timedelta(days=30)
+    updated = 0
+    for bp in AgentBlueprint.objects.filter(built_agent__isnull=False).select_related("built_agent"):
+        stats = AgentRun.objects.filter(agent=bp.built_agent, started_at__gte=since).aggregate(
+            runs=Count("id"),
+            failed=Count("id", filter=Q(status="failed")),
+            cost=Sum("cost_usd"),
+            rating=Avg("feedback__rating"),
+        )
+        runs = stats["runs"] or 0
+        bp.runtime_feedback = {
+            "runs_30d": runs,
+            "failure_rate": round((stats["failed"] or 0) / runs, 3) if runs else 0.0,
+            "avg_rating": round(float(stats["rating"]), 2) if stats["rating"] else None,
+            "cost_30d_usd": float(stats["cost"] or 0),
+            "computed_at": timezone.now().isoformat(),
+        }
+        bp.save(update_fields=["runtime_feedback", "updated_at"])
+        updated += 1
+    return updated
+
+
+def escalate_stale_items() -> list[str]:
+    """
+    OE-5 + GV-6: escalate governance reviews pending beyond the SLA and
+    overdue risk-register reviews. One alert per item per day (cache dedupe).
+    """
+    from controlplane.models import GovernanceReview, RiskItem
+    from controlplane.services.alerts import send_alert
+
+    escalated: list[str] = []
+    sla_days = int(getattr(settings, "REVIEW_ESCALATION_DAYS", 3))
+    cutoff = timezone.now() - timedelta(days=sla_days)
+
+    for review in GovernanceReview.objects.filter(status="pending", created_at__lt=cutoff).select_related("agent"):
+        key = f"escalation:review:{review.id}"
+        if cache.add(key, 1, timeout=86400):
+            age = (timezone.now() - review.created_at).days
+            send_alert(
+                f"Governance review overdue: {review.agent.name}",
+                f"Pending for {age} days (SLA {sla_days}d). Decide it in the console.",
+                category="governance", link="/console/",
+            )
+            escalated.append(str(review.id))
+
+    today = timezone.now().date()
+    for risk in RiskItem.objects.filter(status__in=["open", "mitigating"], review_by__lt=today):
+        key = f"escalation:risk:{risk.id}"
+        if cache.add(key, 1, timeout=86400):
+            send_alert(
+                f"Risk review overdue: {risk.title}",
+                f"Severity {risk.severity}; review was due {risk.review_by}.",
+                category="governance",
+            )
+            escalated.append(str(risk.id))
+    return escalated

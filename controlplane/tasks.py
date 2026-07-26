@@ -84,6 +84,14 @@ def maintenance(self, job: str) -> dict:
         from controlplane.services.operations import export_evidence
 
         return {"job": job, **export_evidence()}
+    if job == "factory_feedback":
+        from controlplane.services.operations import factory_feedback
+
+        return {"job": job, "blueprints_updated": factory_feedback()}
+    if job == "escalate_stale":
+        from controlplane.services.operations import escalate_stale_items
+
+        return {"job": job, "escalated": escalate_stale_items()}
     logger.warning("maintenance: unknown job %r", job)
     return {"job": job, "status": "unknown"}
 

@@ -1002,6 +1002,10 @@ class Workflow(models.Model):
     status      = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
     owner       = models.CharField(max_length=120, blank=True)
     created_by  = models.CharField(max_length=120, blank=True)
+    # OE-6: versioning — clone creates version+1 with parent link.
+    version     = models.PositiveIntegerField(default=1)
+    parent      = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name="versions")
     # OE-2: unattended triggers. webhook_token empty ⇒ webhook disabled;
     # run_interval_minutes 0 ⇒ no schedule. next_run_at is advanced by the
     # dispatch_scheduled beat job.
@@ -1330,6 +1334,10 @@ class AgentBlueprint(models.Model):
                                      help_text="Tools that must be available before build.")
     missing_data  = models.JSONField(default=list, blank=True,
                                      help_text="Data sources that must be accessible before build.")
+
+    # AI-6: runtime telemetry snapshot written back by the factory feedback
+    # loop — {runs_30d, failure_rate, avg_rating, cost_30d_usd, computed_at}.
+    runtime_feedback = models.JSONField(default=dict, blank=True)
 
     # Approval gate
     approved_by    = models.ForeignKey(
@@ -1908,3 +1916,37 @@ class PlatformConfig(models.Model):
     def get(cls, key: str, default=None):
         row = cls.objects.filter(key=key).first()
         return row.value if row is not None else default
+
+
+class RiskItem(models.Model):
+    """Model/agent risk register entry with a review cadence (GV-6)."""
+    class Severity(models.TextChoices):
+        LOW = "low", "Low"
+        MEDIUM = "medium", "Medium"
+        HIGH = "high", "High"
+        CRITICAL = "critical", "Critical"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        MITIGATING = "mitigating", "Mitigating"
+        ACCEPTED = "accepted", "Accepted"
+        CLOSED = "closed", "Closed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    severity = models.CharField(max_length=10, choices=Severity.choices, default=Severity.MEDIUM)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.OPEN)
+    agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name="risk_items")
+    owner = models.CharField(max_length=120, blank=True, default="")
+    review_by = models.DateField(null=True, blank=True,
+                                 help_text="Next governance review date; overdue items are escalated.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-severity", "review_by"]
+
+    def __str__(self):
+        return f"[{self.severity}] {self.title} ({self.status})"

@@ -195,17 +195,42 @@ class RagService:
             scored.append((score, chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        vector_ranked = [chunk for score, chunk in scored if score > 0.15]
+
+        # AI-1b hybrid retrieval: fuse the vector ranking with a keyword
+        # ranking via reciprocal-rank fusion — exact terms (IDs, acronyms)
+        # that embeddings miss still surface.
+        import re as _re
+
+        terms = _re.findall(r"\w{3,}", query.lower())[:8]
+        kw_ranked = []
+        if terms:
+            kw_scored = []
+            for _score, chunk in scored:
+                text_l = chunk.text.lower()
+                hits = sum(text_l.count(t) for t in terms)
+                if hits:
+                    kw_scored.append((hits, chunk))
+            kw_scored.sort(key=lambda x: x[0], reverse=True)
+            kw_ranked = [c for _h, c in kw_scored]
+
+        fused: dict = {}
+        for rank, chunk in enumerate(vector_ranked):
+            fused[chunk.id] = fused.get(chunk.id, 0) + 1 / (60 + rank)
+        for rank, chunk in enumerate(kw_ranked):
+            fused[chunk.id] = fused.get(chunk.id, 0) + 1 / (60 + rank)
+        by_id = {c.id: c for c in vector_ranked + kw_ranked}
+        top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
 
         return [
             {
-                "title":       chunk.document.title,
-                "chunk_index": chunk.chunk_index,
-                "text":        chunk.text,
-                "score":       round(score, 4),
-                "doc_id":      str(chunk.document_id),
+                "title":       by_id[cid].document.title,
+                "chunk_index": by_id[cid].chunk_index,
+                "text":        by_id[cid].text,
+                "score":       round(fscore, 4),
+                "doc_id":      str(by_id[cid].document_id),
             }
-            for score, chunk in scored[:top_k]
-            if score > 0.15
+            for cid, fscore in top
         ]
 
     # ── Internal ─────────────────────────────────────────────────────────────

@@ -650,3 +650,30 @@ class AgentToolBindingAdmin(admin.ModelAdmin):
     list_filter    = ("binding_status", "connector")
     search_fields  = ("tool_name", "agent__name", "connector__name")
     readonly_fields = ("id", "approved_by", "approved_at", "created_at", "updated_at")
+
+
+from controlplane.models import ApiKey, Notification, PlatformConfig, RiskItem
+
+
+@admin.register(RiskItem)
+class RiskItemAdmin(admin.ModelAdmin):
+    list_display = ("title", "severity", "status", "agent", "owner", "review_by")
+    list_filter = ("severity", "status")
+    search_fields = ("title", "owner")
+
+
+@admin.register(PlatformConfig)
+class PlatformConfigAdmin(admin.ModelAdmin):
+    list_display = ("key", "updated_by", "updated_at")
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ("user", "category", "title", "read_at", "created_at")
+    list_filter = ("category",)
+
+
+@admin.register(ApiKey)
+class ApiKeyAdmin(admin.ModelAdmin):
+    list_display = ("name", "user", "is_active", "last_used_at", "created_at")
+    readonly_fields = ("key_hash",)

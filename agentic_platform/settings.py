@@ -313,7 +313,15 @@ CELERY_BEAT_SCHEDULE = {
     "check-slos": {"task": "controlplane.maintenance", "schedule": 900.0, "args": ("check_slos",)},
     "daily-digest": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("send_digest",)},
     "export-evidence": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("export_evidence",)},
+    # Phase 3 additions
+    "factory-feedback": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("factory_feedback",)},
+    "escalate-stale-items": {"task": "controlplane.maintenance", "schedule": 86400.0, "args": ("escalate_stale",)},
 }
+
+# OE-5: governance reviews pending longer than this are escalated daily.
+REVIEW_ESCALATION_DAYS = int(os.environ.get("REVIEW_ESCALATION_DAYS", "3"))
+# IN-2: bearer/verification tokens accepted on the Slack/Teams channel endpoint.
+CHANNEL_TOKENS = [t.strip() for t in os.environ.get("CHANNEL_TOKENS", "").split(",") if t.strip()]
 
 # ── Email / notifications (UX-2) ──────────────────────────────────────────────
 # SMTP is configured entirely from env; unset EMAIL_HOST ⇒ console backend (dev).

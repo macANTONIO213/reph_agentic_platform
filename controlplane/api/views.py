@@ -2571,7 +2571,7 @@ def notifications_mark_read(request):
 @login_required
 def ops_dead_letters(request):
     """GET /api/v1/ops/dead-letters/ — parked poison work (platform_admin)."""
-    denied = require_role_json(request, "platform_admin")
+    denied = require_role_json(request.user, "platform_admin")
     if denied:
         return denied
     from controlplane.services.workflow_queue import workflow_queue
@@ -2605,7 +2605,7 @@ def ops_dead_letters(request):
 @require_POST
 def ops_dead_letter_requeue(request, run_id):
     """POST /api/v1/ops/dead-letters/<run_id>/requeue/ — fresh attempts (platform_admin)."""
-    denied = require_role_json(request, "platform_admin")
+    denied = require_role_json(request.user, "platform_admin")
     if denied:
         return denied
     from django.shortcuts import get_object_or_404
@@ -2720,7 +2720,7 @@ def workflow_webhook(request, workflow_id, token):
 @require_POST
 def workflow_webhook_rotate(request, workflow_id):
     """POST /api/v1/workflows/<id>/webhook/rotate/ — (re)issue the webhook token."""
-    denied = require_role_json(request, "platform_admin")
+    denied = require_role_json(request.user, "platform_admin")
     if denied:
         return denied
     import secrets as _secrets
@@ -2798,3 +2798,425 @@ def costs_summary(request):
         "by_business_unit": by_bu,
         "by_agent": by_agent,
     })
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 3 — analytics, intelligence, channels, versioning, risk register
+# ──────────────────────────────────────────────────────────────────────────────
+
+@login_required
+@require_GET
+def monitoring_trends(request):
+    """
+    GET /api/v1/monitoring/trends/ — 8 weekly aggregates + naive next-week
+    forecast (AR-3). Tenant-scoped.
+    """
+    now = timezone.now()
+    qs = AgentRun.objects.all()
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+
+    weeks = []
+    for i in range(7, -1, -1):
+        start = now - timedelta(weeks=i + 1)
+        end = now - timedelta(weeks=i)
+        wk = qs.filter(started_at__gte=start, started_at__lt=end)
+        total = wk.count()
+        weeks.append({
+            "week_start": start.date().isoformat(),
+            "runs": total,
+            "failed": wk.filter(status="failed").count(),
+            "cost_usd": float(wk.aggregate(c=Sum("cost_usd"))["c"] or 0),
+            "avg_rating": round(float(wk.aggregate(r=Avg("feedback__rating"))["r"] or 0), 2),
+        })
+
+    def _slope(series):
+        n = len(series)
+        if n < 2:
+            return 0.0
+        mean_x, mean_y = (n - 1) / 2, sum(series) / n
+        denom = sum((i - mean_x) ** 2 for i in range(n)) or 1
+        return sum((i - mean_x) * (y - mean_y) for i, y in enumerate(series)) / denom
+
+    runs_series = [w["runs"] for w in weeks]
+    cost_series = [w["cost_usd"] for w in weeks]
+    forecast = {
+        "runs_next_week": max(0, round(runs_series[-1] + _slope(runs_series))),
+        "cost_next_week_usd": max(0.0, round(cost_series[-1] + _slope(cost_series), 2)),
+    }
+    return JsonResponse({"weeks": weeks, "forecast": forecast})
+
+
+@login_required
+@require_GET
+def costs_roi(request):
+    """
+    GET /api/v1/costs/roi/ — chargeback/showback per BU + factory ROI proxy
+    (AR-2). ?format=csv for finance export.
+    """
+    now = timezone.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    runs = AgentRun.objects.filter(started_at__gte=month_start, status="completed")
+    if not _is_cross_tenant(request.user):
+        runs = runs.filter(agent__org_unit_id=_user_business_unit_id(request.user))
+
+    rows = list(
+        runs.values("agent__org_unit__name")
+        .annotate(runs=Count("id"), cost=Sum("cost_usd"), rating=Avg("feedback__rating"))
+        .order_by("-cost")
+    )
+    chargeback = [
+        {
+            "business_unit": r["agent__org_unit__name"] or "(unassigned)",
+            "runs": r["runs"],
+            "cost_usd": float(r["cost"] or 0),
+            "avg_rating": round(float(r["rating"]), 2) if r["rating"] else None,
+        }
+        for r in rows
+    ]
+
+    # ROI proxy: factory-built agents — opportunity score vs observed runtime.
+    from controlplane.models import AgentBlueprint
+
+    factory_roi = [
+        {
+            "agent": bp.built_agent.slug,
+            "opportunity_score": bp.opportunity_score,
+            **{k: v for k, v in (bp.runtime_feedback or {}).items() if k != "computed_at"},
+        }
+        for bp in AgentBlueprint.objects.filter(built_agent__isnull=False).select_related("built_agent")
+    ]
+
+    if request.GET.get("format") == "csv":
+        from django.http import HttpResponse
+
+        lines = ["business_unit,runs,cost_usd,avg_rating"] + [
+            "{},{},{:.4f},{}".format(c["business_unit"], c["runs"], c["cost_usd"], c["avg_rating"] or "")
+            for c in chargeback
+        ]
+        resp = HttpResponse("\n".join(lines), content_type="text/csv")
+        resp["Content-Disposition"] = 'attachment; filename="chargeback-{:%Y-%m}.csv"'.format(now)
+        return resp
+
+    return JsonResponse({
+        "period": now.strftime("%Y-%m"),
+        "chargeback": chargeback,
+        "factory_roi": factory_roi,
+    })
+
+
+@login_required
+@require_GET
+def factory_portfolio(request):
+    """
+    GET /api/v1/factory/portfolio/ — blueprints ranked by opportunity score
+    blended with observed runtime adoption (AI-6 portfolio view).
+    """
+    from controlplane.models import AgentBlueprint
+
+    qs = AgentBlueprint.objects.exclude(status="retired")
+    if not _is_cross_tenant(request.user):
+        qs = qs.filter(insight__business_unit_id=_user_business_unit_id(request.user))
+
+    items = []
+    for bp in qs.select_related("built_agent"):
+        fb = bp.runtime_feedback or {}
+        # Blend: design-time opportunity (0-10) + usage signal + quality signal.
+        usage = min((fb.get("runs_30d") or 0) / 100, 1.0) * 3
+        quality = ((fb.get("avg_rating") or 3) - 3) * 1.5 - (fb.get("failure_rate") or 0) * 5
+        items.append({
+            "blueprint_id": str(bp.id),
+            "agent_name": bp.agent_name,
+            "status": bp.status,
+            "built_agent": bp.built_agent.slug if bp.built_agent else None,
+            "opportunity_score": bp.opportunity_score,
+            "runtime_feedback": fb,
+            "portfolio_rank_score": round(bp.opportunity_score + usage + quality, 2),
+        })
+    items.sort(key=lambda i: i["portfolio_rank_score"], reverse=True)
+    return JsonResponse({"portfolio": items})
+
+
+def _ops_context() -> str:
+    """Compact operational snapshot fed to the copilot/RCA prompts."""
+    from controlplane.models import BudgetAlert, GovernanceReview, WorkflowRun
+
+    day_ago = timezone.now() - timedelta(days=1)
+    runs = AgentRun.objects.filter(started_at__gte=day_ago)
+    failures = list(
+        runs.filter(status="failed").values_list("agent__slug", "output_text")[:10]
+    )
+    return (
+        "Runs last 24h: {} ({} failed). ".format(runs.count(), runs.filter(status="failed").count())
+        + "Pending governance reviews: {}. ".format(
+            GovernanceReview.objects.filter(status="pending").count())
+        + "Active budget alerts: {}. ".format(
+            BudgetAlert.objects.filter(resolved=False).count())
+        + "Dead-lettered workflow runs: {}. ".format(
+            WorkflowRun.objects.filter(status="dead_letter").count())
+        + "Recent failures: " + "; ".join("{}: {}".format(s, (t or "")[:120]) for s, t in failures)
+    )
+
+
+def _ask_llm(system: str, user: str, max_tokens: int = 700) -> str | None:
+    """One-shot Anthropic call; None when unavailable (callers degrade)."""
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key, timeout=30.0, max_retries=0)
+        resp = client.messages.create(
+            model=getattr(settings, "EVAL_JUDGE_MODEL", "claude-haiku-4-5-20251001"),
+            max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    except Exception as exc:
+        logger.warning("LLM call unavailable: %s", exc)
+        return None
+
+
+@login_required
+@require_POST
+def copilot_ask(request):
+    """
+    POST /api/v1/copilot/ask/ — {"question": "..."} → grounded ops answer (AI-4).
+    Snapshot is platform-wide, so approver/admin only.
+    """
+    if not has_role(request.user, "agent_approver", "platform_admin"):
+        return JsonResponse({"error": "Approver or admin role required."}, status=403)
+    try:
+        question = json.loads(request.body or b"{}").get("question", "").strip()
+    except json.JSONDecodeError:
+        question = ""
+    if not question:
+        return JsonResponse({"error": "Provide 'question'."}, status=400)
+
+    context = _ops_context()
+    answer = _ask_llm(
+        "You are the operations copilot for an enterprise AI-agent control plane. "
+        "Answer concisely using ONLY the operational snapshot provided; say when "
+        "the snapshot cannot answer the question.",
+        "SNAPSHOT:\n{}\n\nQUESTION: {}".format(context, question),
+    )
+    return JsonResponse({
+        "answer": answer or "(LLM unavailable — raw snapshot)\n" + context,
+        "grounded_on": "24h operational snapshot",
+    })
+
+
+@login_required
+@require_POST
+def ops_rca(request, run_id):
+    """
+    POST /api/v1/ops/rca/<workflow_run_id>/ — root-cause analysis of a failed
+    or dead-lettered run (AI-5). LLM-assisted with deterministic fallback.
+    """
+    denied = require_role_json(request.user, "platform_admin")
+    if denied:
+        return denied
+    from django.shortcuts import get_object_or_404
+
+    from controlplane.models import WorkflowRun
+
+    run = get_object_or_404(WorkflowRun, id=run_id)
+    task_errors = [
+        "{}: {} — {}".format(
+            tr.task.step_name if tr.task else "?", tr.status, (tr.error or "")[:300])
+        for tr in run.task_runs.select_related("task").all()
+    ]
+    evidence = (
+        "WorkflowRun {} ({}) status={} attempts={}\nrun.error: {}\nTask runs:\n".format(
+            run.id, run.workflow.name, run.status, run.attempts, (run.error or "")[:500])
+        + "\n".join(task_errors)
+    )
+    analysis = _ask_llm(
+        "You are a reliability engineer. Given the failed workflow evidence, "
+        "state the most likely root cause, the failing component, and one "
+        "concrete remediation. Be brief and specific.",
+        evidence, max_tokens=400,
+    )
+    return JsonResponse({
+        "run_id": str(run.id),
+        "evidence": evidence,
+        "analysis": analysis or "(LLM unavailable — review the evidence above; "
+                                "the first failed task is usually the root cause.)",
+    })
+
+
+# IN-3: SaaS connector catalog (wave 1) — governed presets over the hardened
+# REST/SQL connectors; secrets stay env-var references.
+CONNECTOR_TEMPLATES = {
+    "servicenow": {
+        "connector_type": "rest",
+        "config": {"base_url": "https://{instance}.service-now.com/api/now/table",
+                   "auth_header": "Basic {env:SERVICENOW_BASIC_AUTH}"},
+        "description": "ServiceNow Table API (read): incidents, changes, CMDB.",
+    },
+    "sharepoint": {
+        "connector_type": "rest",
+        "config": {"base_url": "https://graph.microsoft.com/v1.0/sites",
+                   "auth_header": "Bearer {env:MSGRAPH_TOKEN}"},
+        "description": "SharePoint via Microsoft Graph (read): sites, lists, drives.",
+    },
+    "snowflake": {
+        "connector_type": "sql",
+        "config": {"url": "snowflake://{env:SNOWFLAKE_DSN}", "schema": "PUBLIC"},
+        "description": "Snowflake warehouse (SELECT-only through the SQL guard).",
+    },
+}
+
+
+@login_required
+def connector_templates(request):
+    """
+    GET  /api/v1/connectors/templates/            — list presets.
+    POST (platform_admin) {"template","name","overrides"} — create from preset.
+    """
+    if request.method == "GET":
+        return JsonResponse({"templates": CONNECTOR_TEMPLATES})
+    denied = require_role_json(request.user, "platform_admin")
+    if denied:
+        return denied
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON."}, status=400)
+    tpl = CONNECTOR_TEMPLATES.get(body.get("template", ""))
+    if tpl is None:
+        return JsonResponse({"error": "Unknown template."}, status=400)
+    config = {**tpl["config"], **(body.get("overrides") or {})}
+    connector = DataConnector.objects.create(
+        name=body.get("name") or body["template"],
+        connector_type=tpl["connector_type"],
+        config=config,
+        description=tpl["description"],
+        created_by=request.user.username,
+    )
+    AuditLog.objects.create(
+        actor=request.user.username, action="connector.created_from_template",
+        resource_type="DataConnector", resource_id=str(connector.id),
+        payload={"template": body.get("template")},
+    )
+    return JsonResponse({"id": str(connector.id), "name": connector.name}, status=201)
+
+
+@_csrf_exempt
+@require_POST
+def channel_message(request):
+    """
+    POST /api/v1/channels/message/ — Slack/Teams-compatible inbound chat (IN-2).
+
+    Auth: bearer token or form field 'token' matched against CHANNEL_TOKENS
+    (constant-time). Text routes through the governed broker, so guardrails,
+    audit, and pricing all apply. Response shape is Slack-compatible.
+    """
+    import hmac as _hmac
+
+    tokens = getattr(settings, "CHANNEL_TOKENS", [])
+    presented = ""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        presented = auth[7:]
+    elif request.POST.get("token"):
+        presented = request.POST["token"]
+    if not tokens or not any(_hmac.compare_digest(t, presented) for t in tokens):
+        return JsonResponse({"error": "Unauthorized."}, status=401)
+
+    text = (request.POST.get("text") or "").strip()
+    if not text:
+        try:
+            text = json.loads(request.body or b"{}").get("text", "").strip()
+        except json.JSONDecodeError:
+            text = ""
+    if not text:
+        return JsonResponse({"error": "Provide 'text'."}, status=400)
+
+    from controlplane.services.interop.broker import route_and_execute
+
+    result = route_and_execute(text, submitted_by="channel:slack")
+    if result.get("routed"):
+        output = result.get("output") or "task {} is {}".format(result["task_id"], result["state"])
+        reply = "[{}] {}".format(result["agent"]["name"], output)
+    else:
+        reply = "No suitable agent found for that request."
+    return JsonResponse({"response_type": "ephemeral", "text": reply[:3000]})
+
+
+@login_required
+@require_POST
+def workflow_clone(request, workflow_id):
+    """POST /api/v1/workflows/<id>/clone/ — new draft version with copied DAG (OE-6)."""
+    denied = require_role_json(request.user, "agent_builder", "agent_approver", "platform_admin")
+    if denied:
+        return denied
+    from django.shortcuts import get_object_or_404
+
+    from controlplane.models import Workflow
+
+    src = get_object_or_404(Workflow, id=workflow_id)
+    if not _can_access_business_unit(request.user, src.business_unit_id):
+        return JsonResponse({"error": "You do not have access to this workflow."}, status=403)
+    version = src.version + (src.versions.count() or 0) + 1
+    clone = Workflow.objects.create(
+        name=src.name, slug="{}-v{}-{:%H%M%S}".format(src.slug, version, timezone.now()),
+        description=src.description, business_unit=src.business_unit,
+        status=Workflow.Status.DRAFT, owner=src.owner,
+        created_by=request.user.username, version=version, parent=src,
+    )
+    for t in src.tasks.all():
+        t.pk = None
+        t.workflow = clone
+        t.save()
+    AuditLog.objects.create(
+        actor=request.user.username, action="workflow.cloned",
+        resource_type="Workflow", resource_id=str(clone.id),
+        payload={"parent": str(src.id), "version": version},
+    )
+    return JsonResponse({"id": str(clone.id), "version": version, "status": clone.status}, status=201)
+
+
+@login_required
+def risks(request):
+    """
+    GET  /api/v1/risks/ — risk register (GV-6).
+    POST (approver/admin): {"title","severity","description","agent_id","owner","review_by"}.
+    """
+    from controlplane.models import RiskItem
+
+    if request.method == "POST":
+        denied = require_role_json(request.user, "agent_approver", "platform_admin")
+        if denied:
+            return denied
+        try:
+            body = json.loads(request.body or b"{}")
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON."}, status=400)
+        if not body.get("title"):
+            return JsonResponse({"error": "title is required."}, status=400)
+        risk = RiskItem.objects.create(
+            title=body["title"][:200],
+            description=body.get("description", ""),
+            severity=body.get("severity", "medium"),
+            agent_id=body.get("agent_id") or None,
+            owner=body.get("owner", request.user.username),
+            review_by=body.get("review_by") or None,
+        )
+        AuditLog.objects.create(
+            actor=request.user.username, action="risk.created",
+            resource_type="RiskItem", resource_id=str(risk.id),
+            payload={"title": risk.title, "severity": risk.severity},
+        )
+        return JsonResponse({"id": str(risk.id)}, status=201)
+
+    items = [
+        {
+            "id": str(r.id), "title": r.title, "severity": r.severity,
+            "status": r.status, "agent": r.agent.slug if r.agent else None,
+            "owner": r.owner, "review_by": r.review_by.isoformat() if r.review_by else None,
+        }
+        for r in RiskItem.objects.all()[:200]
+    ]
+    return JsonResponse({"risks": items})

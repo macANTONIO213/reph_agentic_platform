@@ -108,4 +108,14 @@ urlpatterns = [
     path("workflows/<uuid:workflow_id>/webhook/<str:token>/", views.workflow_webhook,  name="api_workflow_webhook"),
     # AR-1: costs
     path("costs/summary/",                             views.costs_summary,           name="api_costs_summary"),
+    # Phase 3
+    path("monitoring/trends/",                         views.monitoring_trends,       name="api_monitoring_trends"),
+    path("costs/roi/",                                 views.costs_roi,               name="api_costs_roi"),
+    path("factory/portfolio/",                         views.factory_portfolio,       name="api_factory_portfolio"),
+    path("copilot/ask/",                               views.copilot_ask,             name="api_copilot_ask"),
+    path("ops/rca/<uuid:run_id>/",                     views.ops_rca,                 name="api_ops_rca"),
+    path("connectors/templates/",                      views.connector_templates,     name="api_connector_templates"),
+    path("channels/message/",                          views.channel_message,         name="api_channel_message"),
+    path("workflows/<uuid:workflow_id>/clone/",        views.workflow_clone,          name="api_workflow_clone"),
+    path("risks/",                                     views.risks,                   name="api_risks"),
 ]

@@ -424,7 +424,10 @@ def console(request):
     from django.contrib import messages
     from django.shortcuts import redirect
 
-    from .models import EvalSuite, Notification, Workflow, WorkflowRun
+    from .models import (
+        AgentBlueprint, EvalSuite, KnowledgeDocument, Notification,
+        RegistryEntry, Workflow, WorkflowRun,
+    )
     from .security import can_access_agent, can_access_business_unit, has_role
 
     is_approver = has_role(request.user, "agent_approver", "platform_admin")
@@ -487,6 +490,36 @@ def console(request):
                     request,
                     f"Eval '{suite.name}': {run.passed_cases}/{run.total_cases} passed.",
                 )
+            elif action == "approve_blueprint" and is_approver:
+                bp = get_object_or_404(AgentBlueprint, id=request.POST["blueprint_id"])
+                if not bp.can_transition_to(AgentBlueprint.Status.APPROVED):
+                    raise ValueError(f"Cannot approve a blueprint in '{bp.status}' status.")
+                bp.status = AgentBlueprint.Status.APPROVED
+                bp.approved_by = request.user
+                bp.approved_at = timezone.now()
+                bp.save(update_fields=["status", "approved_by", "approved_at", "updated_at"])
+                AuditLog.objects.create(
+                    actor=request.user.username, action="blueprint_approved",
+                    resource_type="AgentBlueprint", resource_id=str(bp.id),
+                    payload={"via": "console"},
+                )
+                messages.success(request, f"Blueprint approved: {bp.agent_name}.")
+            elif action == "build_blueprint" and is_builder:
+                from .services.factory import build_compiler
+
+                bp = get_object_or_404(AgentBlueprint, id=request.POST["blueprint_id"])
+                agent = build_compiler.build(bp, built_by=request.user.username)
+                messages.success(request, f"Built sandbox agent '{agent.slug}' from blueprint.")
+            elif action == "approve_registry" and is_approver:
+                entry = get_object_or_404(RegistryEntry, id=request.POST["entry_id"])
+                entry.review_status = "approved"
+                entry.save(update_fields=["review_status", "updated_at"])
+                AuditLog.objects.create(
+                    actor=request.user.username, action="registry_entry_approved",
+                    resource_type="RegistryEntry", resource_id=str(entry.id),
+                    payload={"via": "console"},
+                )
+                messages.success(request, f"Registry entry approved: {entry.name}.")
             elif action == "mark_read":
                 Notification.objects.filter(
                     user=request.user, read_at__isnull=True
@@ -516,8 +549,27 @@ def console(request):
         .order_by("-cost")[:10]
     )
 
+    blueprints_qs = AgentBlueprint.objects.exclude(
+        status__in=[AgentBlueprint.Status.RETIRED, AgentBlueprint.Status.DEPLOYED]
+    ).select_related("built_agent")
+    knowledge_qs = KnowledgeDocument.objects.all()
+    if not cross:
+        blueprints_qs = blueprints_qs.filter(insight__business_unit_id=bu_id)
+        knowledge_qs = knowledge_qs.filter(business_unit_id=bu_id) | knowledge_qs.filter(business_unit__isnull=True)
+
+    persona = {
+        "agents_total": agents_qs.count(),
+        "agents_production": agents_qs.filter(status="production").count(),
+        "pending_reviews": reviews_qs.count(),
+    }
+
     notifications = Notification.objects.filter(user=request.user)[:20]
     context = {
+        "persona": persona,
+        "blueprints": blueprints_qs[:25],
+        "knowledge_docs": knowledge_qs.order_by("-created_at")[:15],
+        "registry_discovered": RegistryEntry.objects.filter(review_status="discovered")[:15]
+                               if is_approver else [],
         "is_approver": is_approver,
         "is_builder": is_builder,
         "pending_reviews": reviews_qs[:25],

@@ -35,6 +35,35 @@
         <div class="msg {{ m.tags }}" role="alert">{{ m }}</div>
       {% endfor %}
 
+      <p class="muted">
+        {{ persona.agents_total }} agents in scope · {{ persona.agents_production }} in production ·
+        {{ persona.pending_reviews }} review{{ persona.pending_reviews|pluralize }} pending
+        {% if is_approver %} · you can approve{% elif is_builder %} · you can build{% endif %}
+      </p>
+
+      {% if is_approver %}
+      <h2>Ops copilot</h2>
+      <form id="copilot-form">
+        <input type="text" id="copilot-q" name="q" size="60" placeholder="e.g. why are runs failing today?" aria-label="Copilot question">
+        <button class="btn">Ask</button>
+      </form>
+      <p id="copilot-a" class="muted" aria-live="polite"></p>
+      <script>
+        document.getElementById('copilot-form').addEventListener('submit', async function (e) {
+          e.preventDefault();
+          const out = document.getElementById('copilot-a');
+          out.textContent = 'Thinking…';
+          const resp = await fetch('/api/v1/copilot/ask/', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': document.cookie.match(/csrftoken=([^;]+)/)?.[1] || ''},
+            body: JSON.stringify({question: document.getElementById('copilot-q').value}),
+          });
+          const data = await resp.json();
+          out.textContent = data.answer || data.error || 'No answer.';
+        });
+      </script>
+      {% endif %}
+
       <h2>Notifications {% if unread %}<span class="badge">{{ unread }}</span>{% endif %}</h2>
       {% if notifications %}
         <form method="post" class="inline">{% csrf_token %}
@@ -146,6 +175,71 @@
           {% endfor %}
         </table>
       {% else %}<p class="muted">No active eval suites.</p>{% endif %}
+
+      <h2>Agent Factory</h2>
+      {% if blueprints %}
+        <table>
+          <tr><th>Blueprint</th><th>Status</th><th>Score</th><th>Runtime (30d)</th><th></th></tr>
+          {% for bp in blueprints %}
+            <tr>
+              <td>{{ bp.agent_name }}{% if bp.built_agent %} <span class="muted">→ {{ bp.built_agent.slug }}</span>{% endif %}</td>
+              <td>{{ bp.status }}</td>
+              <td class="muted">{{ bp.opportunity_score|floatformat:1 }}</td>
+              <td class="muted">{% if bp.runtime_feedback.runs_30d %}{{ bp.runtime_feedback.runs_30d }} runs, {{ bp.runtime_feedback.failure_rate }} fail{% else %}—{% endif %}</td>
+              <td>
+                {% if is_approver and bp.status != 'approved' and bp.status != 'built' %}
+                  <form method="post" class="inline">{% csrf_token %}
+                    <input type="hidden" name="action" value="approve_blueprint">
+                    <input type="hidden" name="blueprint_id" value="{{ bp.id }}">
+                    <button class="btn">Approve</button>
+                  </form>
+                {% endif %}
+                {% if is_builder and bp.status == 'approved' %}
+                  <form method="post" class="inline">{% csrf_token %}
+                    <input type="hidden" name="action" value="build_blueprint">
+                    <input type="hidden" name="blueprint_id" value="{{ bp.id }}">
+                    <button class="btn">Build sandbox agent</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+        <p class="muted">Portfolio ranking: <code>GET /api/v1/factory/portfolio/</code></p>
+      {% else %}<p class="muted">No active blueprints.</p>{% endif %}
+
+      {% if registry_discovered %}
+        <h2>Registry — discovered entries awaiting review</h2>
+        <table>
+          <tr><th>Name</th><th>Kind</th><th>Provider</th><th></th></tr>
+          {% for e in registry_discovered %}
+            <tr>
+              <td>{{ e.name }}</td><td class="muted">{{ e.kind }}</td><td class="muted">{{ e.provider_org }}</td>
+              <td>
+                <form method="post" class="inline">{% csrf_token %}
+                  <input type="hidden" name="action" value="approve_registry">
+                  <input type="hidden" name="entry_id" value="{{ e.id }}">
+                  <button class="btn">Approve</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endif %}
+
+      <h2>Knowledge base</h2>
+      {% if knowledge_docs %}
+        <table>
+          <tr><th>Document</th><th>Status</th><th>Scope</th><th>Added</th></tr>
+          {% for d in knowledge_docs %}
+            <tr>
+              <td>{{ d.title }}</td><td class="muted">{{ d.status }}</td>
+              <td class="muted">{% if d.business_unit %}{{ d.business_unit.name }}{% else %}platform-wide{% endif %}</td>
+              <td class="muted">{{ d.created_at|date:"Y-m-d" }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}<p class="muted">No knowledge documents.</p>{% endif %}
 
       <h2>Costs (month to date: ${{ cost_total|floatformat:2 }})</h2>
       {% if cost_rows %}
