@@ -23,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import urllib.parse
+import urllib.request
 
 from django.conf import settings
 
@@ -107,3 +108,33 @@ def validate_destination(
 
     if resolve and ip is None:
         _validate_resolved(host, parsed, error_cls)
+
+
+class _RevalidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-run the SSRF policy on every redirect hop before following it.
+
+    Plain ``urlopen`` follows 3xx transparently, so a validated destination can
+    bounce the client to an internal/metadata address. This handler closes that
+    hole by validating each ``Location`` against the same policy.
+    """
+
+    def __init__(self, error_cls: type[Exception], resolve: bool | None):
+        super().__init__()
+        self._error_cls = error_cls
+        self._resolve = resolve
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_destination(newurl, error_cls=self._error_cls, resolve=self._resolve)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def install_safe_opener() -> None:
+    """Install a process-wide opener that re-validates every redirect hop.
+
+    Because ``urllib.request.urlopen`` honours the installed opener, this closes
+    the SSRF-via-redirect hole on *every* outbound urllib path at once — the REST
+    connector, MCP/A2A clients, scanners, and the HTTP-API adapter — without
+    touching each call site. Called once from ``ControlplaneConfig.ready``.
+    """
+    opener = urllib.request.build_opener(_RevalidatingRedirectHandler(BlockedDestinationError, None))
+    urllib.request.install_opener(opener)

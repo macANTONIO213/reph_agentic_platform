@@ -1908,9 +1908,10 @@ def factory_insights_list(request):
             try:
                 bu = BusinessUnit.objects.get(name=bu_val)
             except BusinessUnit.DoesNotExist:
+                from django.core.exceptions import ValidationError
                 try:
                     bu = BusinessUnit.objects.get(id=bu_val)
-                except (BusinessUnit.DoesNotExist, Exception):
+                except (BusinessUnit.DoesNotExist, ValidationError, ValueError):
                     pass
         if not _is_cross_tenant(request.user):
             own_bu_id = _user_business_unit_id(request.user)

@@ -105,7 +105,10 @@ class ToolRegistry:
         return self.names()
 
     def _is_available(self, spec: ToolSpec, agent, ctx: ToolContext | None = None) -> bool:
-        agent_tier = getattr(agent, "risk_tier", 1) if agent is not None else 4
+        # Unknown principal (agent is None, e.g. external MCP caller) gets the
+        # LOWEST tier so only the least-risky read-only tools are reachable —
+        # never the highest (audit S-03).
+        agent_tier = getattr(agent, "risk_tier", 1) if agent is not None else 1
         if spec.risk_tier > agent_tier:
             return False
         if spec.requires_binding:
@@ -161,7 +164,8 @@ class ToolRegistry:
             return {"error": f"Unknown tool: {name}"}
 
         agent = ctx.agent
-        agent_tier = getattr(agent, "risk_tier", 1) if agent is not None else 4
+        # Unknown principal → lowest tier (audit S-03); see _is_available.
+        agent_tier = getattr(agent, "risk_tier", 1) if agent is not None else 1
         if spec.risk_tier > agent_tier:
             return {
                 "error": (

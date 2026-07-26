@@ -280,6 +280,11 @@ class AgentRun(models.Model):
 
     class Meta:
         ordering = ["-started_at"]
+        indexes = [
+            # Metrics/cost/latency aggregates filter on these on every scrape (audit DA-04).
+            models.Index(fields=["agent", "status", "started_at"], name="agentrun_agent_status_at"),
+            models.Index(fields=["started_at"], name="agentrun_started_at"),
+        ]
 
     def __str__(self):
         return f"{self.agent.name} run {self.id}"

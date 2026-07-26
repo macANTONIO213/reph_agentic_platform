@@ -75,6 +75,31 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.0"
 
+  # Nightly data-protection job: enforce retention windows + export compliance
+  # evidence. Closes the "documented but never scheduled" gap (audit DA-02/DA-10).
+  - type: cron
+    name: reph-agentic-retention
+    runtime: python
+    schedule: "0 2 * * *"        # 02:00 UTC daily
+    buildCommand: pip install -r requirements.txt -c constraints.txt
+    startCommand: python manage.py enforce_retention && python manage.py export_compliance_evidence
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        fromService:
+          name: reph-agentic-platform
+          type: web
+          envVarKey: DJANGO_SECRET_KEY
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reph-agentic-platform-db
+          property: connectionString
+      - key: LOG_FORMAT
+        value: json
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+
   - type: redis
     name: reph-agentic-redis
     ipAllowList: []          # internal-only; reachable only by the web + worker

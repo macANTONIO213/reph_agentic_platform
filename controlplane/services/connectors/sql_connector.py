@@ -28,7 +28,15 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 _FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|GRANT|REVOKE)\b",
+    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|GRANT|REVOKE|"
+    r"MERGE|CALL|COPY|VACUUM|ANALYZE|ATTACH|PRAGMA)\b",
+    re.IGNORECASE,
+)
+# System catalogs, file/network functions, and dblink are data-exfiltration and
+# DoS vectors even from a pure SELECT (audit S-04).
+_FORBIDDEN_REFS = re.compile(
+    r"\b(information_schema|pg_catalog|pg_sleep|pg_read_file|pg_ls_dir|pg_stat_file|"
+    r"lo_import|lo_export|dblink|current_setting|set_config)\b",
     re.IGNORECASE,
 )
 _MAX_ROWS = 200
@@ -70,10 +78,20 @@ class SqlConnector:
     @staticmethod
     def _validate(sql: str, *, allowed_schema: str = ""):
         sql_stripped = sql.strip()
+        # Reject SQL comments — they hide payloads from the keyword checks below.
+        if "--" in sql_stripped or "/*" in sql_stripped:
+            raise SqlConnectorError("SQL comments are not permitted.")
+        # Reject stacked statements: at most one trailing semicolon allowed.
+        if ";" in sql_stripped.rstrip().rstrip(";"):
+            raise SqlConnectorError("Multiple SQL statements are not permitted.")
         if _FORBIDDEN.search(sql_stripped):
             raise SqlConnectorError(
                 "Only SELECT statements are permitted. "
                 "Mutation or DDL statements are blocked."
+            )
+        if _FORBIDDEN_REFS.search(sql_stripped):
+            raise SqlConnectorError(
+                "Query references a disallowed system catalog or function."
             )
         if not sql_stripped.upper().startswith("SELECT"):
             raise SqlConnectorError("Query must start with SELECT.")

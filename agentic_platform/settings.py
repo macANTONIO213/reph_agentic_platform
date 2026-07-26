@@ -219,11 +219,19 @@ AGENT_CIRCUIT_BREAKER_COOLDOWN_SECONDS = int(
 WORKFLOW_RUN_MAX_ATTEMPTS = int(os.environ.get("WORKFLOW_RUN_MAX_ATTEMPTS", "3"))
 ASYNC_TASK_MAX_ATTEMPTS = int(os.environ.get("ASYNC_TASK_MAX_ATTEMPTS", "3"))
 # Outbound LLM client timeouts (A5) — a hung upstream must not pin a worker.
-LLM_CLIENT_TIMEOUT_SECONDS = float(os.environ.get("LLM_CLIENT_TIMEOUT_SECONDS", "120"))
+# Kept below the gunicorn worker --timeout (120s) so a slow upstream returns a
+# clean error instead of racing a mid-stream worker SIGKILL (audit PF-02).
+LLM_CLIENT_TIMEOUT_SECONDS = float(os.environ.get("LLM_CLIENT_TIMEOUT_SECONDS", "90"))
 LLM_CLIENT_MAX_RETRIES = int(os.environ.get("LLM_CLIENT_MAX_RETRIES", "2"))
 BROKER_ROUTER_TIMEOUT_SECONDS = float(os.environ.get("BROKER_ROUTER_TIMEOUT_SECONDS", "20"))
-# SSRF egress hardening (C3) — opt-in DNS re-checking + private-range blocking.
-NET_GUARD_RESOLVE_DNS = os.environ.get("NET_GUARD_RESOLVE_DNS", "").lower() in ("true", "1", "yes")
+# SSRF egress hardening (C3) — DNS re-checking + private-range blocking.
+# RESOLVE_DNS is secure-by-default in production: it re-checks resolved IPs and
+# blocks loopback/link-local/metadata (e.g. 169.254.169.254) while still allowing
+# ordinary internal hostnames. Local dev keeps it off for latency (audit S-02).
+# BLOCK_PRIVATE stays opt-in: RFC1918 is allowed by design for internal connectors,
+# so blocking it is a per-environment decision, not a safe global default.
+_resolve_dns_default = "False" if DEBUG else "True"
+NET_GUARD_RESOLVE_DNS = os.environ.get("NET_GUARD_RESOLVE_DNS", _resolve_dns_default).lower() in ("true", "1", "yes")
 NET_GUARD_BLOCK_PRIVATE = os.environ.get("NET_GUARD_BLOCK_PRIVATE", "").lower() in ("true", "1", "yes")
 # Bearer tokens a Prometheus/Grafana scraper may present to /api/v1/metrics/
 # (session-less machine scraping). Empty ⇒ session+admin only.

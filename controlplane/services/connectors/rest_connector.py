@@ -132,6 +132,23 @@ class RestConnector:
         cache.delete(self._failure_key())
         cache.delete(self._open_until_key())
 
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        """Strip credentials + query string from a URL before it is audited.
+
+        A base_url or query string can embed tokens/keys; the audit table must
+        not become a secret store (audit S-06).
+        """
+        import urllib.parse
+        try:
+            p = urllib.parse.urlsplit(url)
+            netloc = p.hostname or ""
+            if p.port:
+                netloc = f"{netloc}:{p.port}"
+            return urllib.parse.urlunsplit((p.scheme, netloc, p.path, "", ""))[:200]
+        except Exception:
+            return "(redacted)"
+
     def _audit(self, method: str, url: str, actor: str,
                success: bool, error: str = "", status_code: int = 0):
         try:
@@ -144,7 +161,7 @@ class RestConnector:
                 payload={
                     "connector":   self.connector.name,
                     "method":      method,
-                    "url_preview": url[:200],
+                    "url_preview": self._redact_url(url),
                     "success":     success,
                     "status_code": status_code,
                     "error":       error,
